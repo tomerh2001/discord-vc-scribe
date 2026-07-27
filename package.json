@@ -1,0 +1,36 @@
+{
+  "name": "discord-vc-scribe",
+  "version": "0.1.0",
+  "description": "Private 24/7 Discord voice-channel scribe — sits in a VC, logs joins/leaves, and transcribes who said what into a text channel.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tomerh2001/discord-vc-scribe.git"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.18.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "libsodium-wrappers": "^0.7.15",
+    "prism-media": "^1.3.5"
+  },
+  "optionalDependencies": {
+    "@snazzah/davey": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

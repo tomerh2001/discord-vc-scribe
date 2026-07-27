@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VC Scribe — self-hosted Discord voice transcription</title>
+<meta name="description" content="A private, self-hosted Discord bot that sits in a voice channel 24/7 and transcribes who said what.">
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #181b24;
+    --border: #2a2f3d;
+    --text: #e6e8ee;
+    --muted: #9aa1b2;
+    --accent: #7aa2ff;
+    --green: #5dd39e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  header { text-align: center; padding: 72px 0 48px; }
+  header h1 { font-size: 2.6rem; letter-spacing: -0.02em; }
+  header h1 .mic { color: var(--accent); }
+  header p.tag { color: var(--muted); font-size: 1.15rem; max-width: 560px; margin: 12px auto 0; }
+  .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 10px 22px; border-radius: 8px;
+    text-decoration: none; font-weight: 600; font-size: 0.95rem;
+  }
+  .btn-primary { background: var(--accent); color: #0d1017; }
+  .btn-ghost { border: 1px solid var(--border); color: var(--text); }
+  .btn:hover { filter: brightness(1.1); }
+
+  section { padding: 32px 0; }
+  h2 { font-size: 1.3rem; margin-bottom: 16px; color: var(--accent); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px;
+  }
+  .card h3 { font-size: 1rem; margin-bottom: 6px; }
+  .card p { color: var(--muted); font-size: 0.92rem; }
+
+  .chat {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px 22px; font-size: 0.95rem;
+  }
+  .chat .line { padding: 3px 0; }
+  .chat .m { color: var(--accent); font-weight: 600; }
+  .chat .sys { color: var(--muted); }
+  .chat .ok { color: var(--green); }
+
+  pre {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; overflow-x: auto;
+    font-size: 0.88rem; line-height: 1.5;
+  }
+  code { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+  .steps { list-style: none; counter-reset: step; }
+  .steps li {
+    counter-increment: step; margin-bottom: 10px; padding-left: 40px; position: relative;
+    color: var(--muted);
+  }
+  .steps li strong { color: var(--text); }
+  .steps li::before {
+    content: counter(step); position: absolute; left: 0; top: 2px;
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--panel); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.8rem; color: var(--accent); font-weight: 700;
+  }
+  footer {
+    text-align: center; color: var(--muted); font-size: 0.85rem;
+    padding: 40px 0 56px; border-top: 1px solid var(--border); margin-top: 40px;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f8fa; --panel: #ffffff; --border: #dde1e8;
+      --text: #1c2130; --muted: #5b6372; --accent: #3b6fe0; --green: #1f9d6b;
+    }
+    .btn-primary { color: #ffffff; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1><span class="mic">🎙</span> VC Scribe</h1>
+    <p class="tag">A private, self-hosted Discord bot that sits in a voice channel 24/7 and writes down who said what.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/tomerh2001/discord-vc-scribe">View on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/tomerh2001/discord-vc-scribe#setup">Setup guide</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>What it looks like</h2>
+    <div class="chat">
+      <div class="line sys">➡️ <span class="m">@Tomer</span> joined the call.</div>
+      <div class="line sys">➡️ <span class="m">@Dana</span> joined the call.</div>
+      <div class="line"><span class="m">@Tomer</span> okay so culvert reset is tomorrow, are we running it early?</div>
+      <div class="line"><span class="m">@Dana</span> yeah let's do it right after reset, I need the points</div>
+      <div class="line sys">🔇 Deafened — transcription paused. Undeafen me to resume.</div>
+      <div class="line sys ok">🎙️ Undeafened — transcription resumed.</div>
+      <div class="line sys">⬅️ <span class="m">@Dana</span> left the call.</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Features</h2>
+    <div class="grid">
+      <div class="card"><h3>🎙️ Exact attribution</h3><p>Discord sends one audio stream per speaker — every message starts with @who-said-it. No diarization guesswork.</p></div>
+      <div class="card"><h3>📌 Assigned, not invited</h3><p>/scribe assign parks it in a VC until you unassign it. Survives restarts, auto-reconnects.</p></div>
+      <div class="card"><h3>🔇 Deafen = pause</h3><p>Server-deafen the bot to stop transcription instantly. Undeafen to resume. Visible to everyone in the call.</p></div>
+      <div class="card"><h3>➡️ Full call log</h3><p>Joins and leaves are logged alongside speech, so the transcript reads like the call happened.</p></div>
+      <div class="card"><h3>🏠 100% on your hardware</h3><p>Local Whisper (faster-whisper via speaches). Audio never leaves your server.</p></div>
+      <div class="card"><h3>🔒 Private by design</h3><p>Built to run with Discord's "Public Bot" switched off — nobody but you can add it anywhere.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Up and running in three steps</h2>
+    <ol class="steps">
+      <li><strong>Create a Discord app</strong> with <em>Public Bot</em> unchecked, copy the token.</li>
+      <li><strong>docker compose up -d</strong> on your home server — bot + local Whisper, one command.</li>
+      <li><strong>/scribe assign</strong> a voice channel and a log channel. Done.</li>
+    </ol>
+    <pre><code>git clone https://github.com/tomerh2001/discord-vc-scribe.git
+cd discord-vc-scribe
+cp .env.example .env   # paste your DISCORD_TOKEN
+docker compose up -d --build</code></pre>
+  </section>
+
+  <footer>
+    <p>MIT licensed · TypeScript, discord.js &amp; faster-whisper ·
+    <a href="https://github.com/tomerh2001/discord-vc-scribe">github.com/tomerh2001/discord-vc-scribe</a></p>
+    <p>Record responsibly — make sure everyone in the call knows the scribe is listening.</p>
+  </footer>
+
+</div>
+</body>
+</html>

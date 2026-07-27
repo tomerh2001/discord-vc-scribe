@@ -1,0 +1,23 @@
+services:
+  scribe:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      STT_URL: http://stt:8000
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    depends_on:
+      - stt
+
+  # OpenAI-compatible Whisper server (faster-whisper under the hood).
+  # For NVIDIA GPUs use the :latest-cuda tag and add a `deploy` GPU reservation.
+  stt:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    restart: unless-stopped
+    volumes:
+      - hf-cache:/home/ubuntu/.cache/huggingface
+
+volumes:
+  hf-cache:
