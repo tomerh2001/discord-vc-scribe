@@ -49,6 +49,8 @@ export class TranscriberSession {
 	private readonly capturing = new Set<string>();
 	private deafened = false;
 	private destroyed = false;
+	/** True when the bot intentionally left because the channel is empty. */
+	private parked = false;
 	private sendQueue: Promise<unknown> = Promise.resolve();
 	private activeWork = 0;
 	private typingTimer: NodeJS.Timeout | undefined;
@@ -60,15 +62,25 @@ export class TranscriberSession {
 
 	async start(announce: boolean): Promise<void> {
 		const channel = await this.fetchVoiceChannel();
-		this.join(channel);
+		if (TranscriberSession.hasHumans(channel)) {
+			this.join(channel);
+		} else {
+			this.parked = true;
+		}
 
 		const me = await channel.guild.members.fetchMe().catch(() => null);
 		this.deafened = Boolean(me?.voice.deaf);
 
 		if (announce) {
-			const suffix = this.deafened ? ' I am currently deafened, so transcription is paused.' : '';
+			const suffix = this.parked
+				? ' The channel is empty, so I will hop in when someone joins.'
+				: (this.deafened ? ' I am currently deafened, so transcription is paused.' : '');
 			this.log(`📌 Assigned to <#${this.assignment.voiceChannelId}> — logging this call here.${suffix}`);
 		}
+	}
+
+	private static hasHumans(channel: VoiceBasedChannel): boolean {
+		return channel.members.some(member => !member.user.bot);
 	}
 
 	async stop(announce: boolean): Promise<void> {
@@ -116,9 +128,50 @@ export class TranscriberSession {
 
 		if (joined) {
 			this.log(`➡️ <@${newState.id}> joined the call.`);
+			void this.unparkIfOccupied();
 		} else if (left) {
 			this.log(`⬅️ <@${newState.id}> left the call.`);
+			void this.parkIfEmpty();
 		}
+	}
+
+	/** Join the voice channel when parked and a human is present. */
+	private async unparkIfOccupied(): Promise<void> {
+		if (this.destroyed || this.connection) {
+			return;
+		}
+
+		try {
+			const channel = await this.fetchVoiceChannel();
+			if (TranscriberSession.hasHumans(channel)) {
+				this.parked = false;
+				this.join(channel);
+			}
+		} catch (error) {
+			console.error(`[unpark:${this.assignment.guildId}]`, error);
+		}
+	}
+
+	/** Leave the voice channel (but stay assigned) when no humans remain. */
+	private async parkIfEmpty(): Promise<void> {
+		if (this.destroyed || !this.connection) {
+			return;
+		}
+
+		const channel = await this.fetchVoiceChannel().catch(() => null);
+		if (!channel || TranscriberSession.hasHumans(channel)) {
+			return;
+		}
+
+		this.parked = true;
+		try {
+			this.connection.destroy();
+		} catch {
+			// Already destroyed.
+		}
+
+		this.connection = undefined;
+		this.log('💤 Everyone left — parking until someone joins.');
 	}
 
 	private onOwnVoiceStateUpdate(state: VoiceState): void {
@@ -192,7 +245,7 @@ export class TranscriberSession {
 					// Already destroyed.
 				}
 
-				if (!this.destroyed) {
+				if (!this.destroyed && !this.parked) {
 					setTimeout(() => {
 						void this.rejoin();
 					}, REJOIN_DELAY_MS);
@@ -202,7 +255,7 @@ export class TranscriberSession {
 	}
 
 	private async rejoin(): Promise<void> {
-		if (this.destroyed) {
+		if (this.destroyed || this.parked) {
 			return;
 		}
 

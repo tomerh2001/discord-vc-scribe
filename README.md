@@ -6,6 +6,7 @@ A **private, self-hosted Discord bot** that sits in a voice channel 24/7 and wri
 - ➡️ **Join / leave log** — `@User joined the call` / `@User left the call`
 - 🔇 **Deafen to pause** — server-deafen the bot and it stops transcribing; undeafen to resume
 - 📌 **Assigned, not invited** — `/scribe assign` parks it in a VC until you `/scribe unassign` (it survives restarts and reconnects on its own)
+- 💤 **Presence-aware** — leaves the voice channel when the last person leaves, hops back in the moment someone joins (while staying assigned)
 - 🏠 **Runs entirely on your hardware** — audio never leaves your server; STT is a local Whisper model
 
 Transcript messages render mentions (`@name`) but never ping anyone.
