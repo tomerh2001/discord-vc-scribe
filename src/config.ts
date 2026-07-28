@@ -16,6 +16,13 @@ export const config = {
 	sttModel: process.env.STT_MODEL ?? 'Systran/faster-whisper-small',
 	/** Optional ISO 639-1 language hint (e.g. "en", "he"). Leave unset for auto-detect. */
 	sttLanguage: process.env.STT_LANGUAGE || undefined,
+	/** Comma-separated ISO 639-1 codes; segments detected as any other language are dropped. Empty = keep all. */
+	sttLanguages: (process.env.STT_LANGUAGES ?? '')
+		.split(',')
+		.map(code => code.trim().toLowerCase())
+		.filter(Boolean),
+	/** Ask the STT server to run voice-activity detection before transcribing. */
+	sttVad: ['1', 'true', 'yes'].includes((process.env.STT_VAD ?? '').toLowerCase()),
 	/** Comma-separated guild IDs allowed to use the bot; it leaves any other guild. Empty = allow all. */
 	allowedGuildIds: (process.env.ALLOWED_GUILD_IDS ?? '')
 		.split(',')

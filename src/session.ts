@@ -18,8 +18,7 @@ import {
 import {transcribe} from './stt.js';
 
 const REJOIN_DELAY_MS = 5000;
-const CONTEXT_LINES = 4;
-const CONTEXT_MAX_CHARS = 300;
+const TYPING_REFRESH_MS = 8000;
 
 // Whisper's stock hallucinations on breath/noise segments, normalized to
 // lowercase without punctuation. Only applied to short segments.
@@ -48,10 +47,11 @@ function isLikelyHallucination(text: string, durationMs: number): boolean {
 export class TranscriberSession {
 	private connection: VoiceConnection | undefined;
 	private readonly capturing = new Set<string>();
-	private readonly recentLines: string[] = [];
 	private deafened = false;
 	private destroyed = false;
 	private sendQueue: Promise<unknown> = Promise.resolve();
+	private activeWork = 0;
+	private typingTimer: NodeJS.Timeout | undefined;
 
 	constructor(
 		private readonly client: Client,
@@ -85,6 +85,10 @@ export class TranscriberSession {
 		}
 
 		this.connection = undefined;
+		if (this.typingTimer) {
+			clearInterval(this.typingTimer);
+			this.typingTimer = undefined;
+		}
 	}
 
 	get isDeafened(): boolean {
@@ -240,12 +244,43 @@ export class TranscriberSession {
 		}
 	}
 
+	/** Shows "Bot is typing…" in the log channel while audio is being captured or transcribed. */
+	private beginWork(): void {
+		this.activeWork++;
+		if (!this.typingTimer) {
+			void this.sendTyping();
+			this.typingTimer = setInterval(() => {
+				void this.sendTyping();
+			}, TYPING_REFRESH_MS);
+		}
+	}
+
+	private endWork(): void {
+		this.activeWork = Math.max(0, this.activeWork - 1);
+		if (this.activeWork === 0 && this.typingTimer) {
+			clearInterval(this.typingTimer);
+			this.typingTimer = undefined;
+		}
+	}
+
+	private async sendTyping(): Promise<void> {
+		if (this.destroyed || this.deafened) {
+			return;
+		}
+
+		const channel = await this.client.channels.fetch(this.assignment.logChannelId).catch(() => null);
+		if (channel?.isTextBased() && 'sendTyping' in channel) {
+			await channel.sendTyping().catch(() => undefined);
+		}
+	}
+
 	private async captureSegment(userId: string): Promise<void> {
 		const receiver = this.connection?.receiver;
 		if (!receiver) {
 			return;
 		}
 
+		this.beginWork();
 		await new Promise<void>(resolve => {
 			const opusStream = receiver.subscribe(userId, {
 				end: {behavior: EndBehaviorType.AfterSilence, duration: config.silenceMs},
@@ -296,24 +331,35 @@ export class TranscriberSession {
 	}
 
 	private async finishSegment(userId: string, pcm: Buffer): Promise<void> {
-		if (this.destroyed || this.deafened) {
-			return;
-		}
-
-		const durationMs = Math.round(pcmDurationMs(pcm));
-		if (durationMs < config.minSpeechMs) {
-			console.log(`[segment:${this.assignment.guildId}] ${userId}: ${durationMs}ms — too short, skipped`);
-			return;
-		}
-
 		try {
+			if (this.destroyed || this.deafened) {
+				return;
+			}
+
+			const durationMs = Math.round(pcmDurationMs(pcm));
+			if (durationMs < config.minSpeechMs) {
+				console.log(`[segment:${this.assignment.guildId}] ${userId}: ${durationMs}ms — too short, skipped`);
+				return;
+			}
+
 			const startedAt = Date.now();
-			// Recent conversation lines prime the model for names and jargon.
-			const prompt = this.recentLines.join(' ').slice(-CONTEXT_MAX_CHARS) || undefined;
-			const text = (await transcribe(pcmToWavMono(pcm), prompt)).trim();
-			console.log(`[stt:${this.assignment.guildId}] ${userId}: ${durationMs}ms audio -> ${text.length} chars in ${Date.now() - startedAt}ms`);
+			const {text, language, noSpeechProb, avgLogprob} = await transcribe(pcmToWavMono(pcm));
+			console.log(
+				`[stt:${this.assignment.guildId}] ${userId}: ${durationMs}ms audio -> ${text.length} chars in `
+				+ `${Date.now() - startedAt}ms (lang=${language} nsp=${noSpeechProb.toFixed(2)} alp=${avgLogprob.toFixed(2)})`,
+			);
 			// Whisper emits punctuation-only or bracketed noise for non-speech audio.
 			if (!text || /^[\s.,!?\-–—'"«»()[\]]*$/.test(text)) {
+				return;
+			}
+
+			if (config.sttLanguages.length > 0 && !config.sttLanguages.includes(language)) {
+				console.log(`[stt:${this.assignment.guildId}] ${userId}: dropped ${language} segment (not in allowlist): "${text.slice(0, 60)}"`);
+				return;
+			}
+
+			if (noSpeechProb > 0.6 && avgLogprob < -0.7) {
+				console.log(`[stt:${this.assignment.guildId}] ${userId}: dropped low-confidence segment (nsp=${noSpeechProb.toFixed(2)} alp=${avgLogprob.toFixed(2)}): "${text.slice(0, 60)}"`);
 				return;
 			}
 
@@ -323,12 +369,10 @@ export class TranscriberSession {
 			}
 
 			this.log(`<@${userId}> ${text}`.slice(0, 1990));
-			this.recentLines.push(text);
-			if (this.recentLines.length > CONTEXT_LINES) {
-				this.recentLines.shift();
-			}
 		} catch (error) {
 			console.error(`[stt:${this.assignment.guildId}]`, error);
+		} finally {
+			this.endWork();
 		}
 	}
 
