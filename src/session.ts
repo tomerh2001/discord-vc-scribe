@@ -128,8 +128,19 @@ export class TranscriberSession {
 		this.connection = connection;
 
 		connection.receiver.speaking.on('start', userId => {
+			console.log(`[voice:${this.assignment.guildId}] speaking start: ${userId}`);
 			void this.captureUser(userId);
 		});
+
+		connection.on('stateChange', (oldState, newState) => {
+			console.log(`[voice:${this.assignment.guildId}] ${oldState.status} -> ${newState.status}`);
+		});
+
+		if (process.env.VOICE_DEBUG) {
+			connection.on('debug', message => {
+				console.log(`[voice-debug:${this.assignment.guildId}] ${message}`);
+			});
+		}
 
 		connection.on('error', error => {
 			console.error(`[voice:${this.assignment.guildId}]`, error);
@@ -229,6 +240,7 @@ export class TranscriberSession {
 					opusStream.destroy();
 				}
 
+				console.log(`[capture:${this.assignment.guildId}] ${userId}: ${bytes} PCM bytes collected`);
 				void this.finishSegment(userId, Buffer.concat(chunks));
 				resolve();
 			};
@@ -242,21 +254,35 @@ export class TranscriberSession {
 			});
 
 			decoder.once('end', finish);
-			decoder.once('error', finish);
+			decoder.once('error', error => {
+				console.error(`[decode:${userId}]`, error);
+				finish();
+			});
 			opusStream.once('close', finish);
-			opusStream.once('error', finish);
+			opusStream.once('error', error => {
+				console.error(`[opus:${userId}]`, error);
+				finish();
+			});
 
 			opusStream.pipe(decoder);
 		});
 	}
 
 	private async finishSegment(userId: string, pcm: Buffer): Promise<void> {
-		if (this.destroyed || this.deafened || pcmDurationMs(pcm) < config.minSpeechMs) {
+		if (this.destroyed || this.deafened) {
+			return;
+		}
+
+		const durationMs = Math.round(pcmDurationMs(pcm));
+		if (durationMs < config.minSpeechMs) {
+			console.log(`[segment:${this.assignment.guildId}] ${userId}: ${durationMs}ms — too short, skipped`);
 			return;
 		}
 
 		try {
+			const startedAt = Date.now();
 			const text = (await transcribe(pcmToWav16kMono(pcm))).trim();
+			console.log(`[stt:${this.assignment.guildId}] ${userId}: ${durationMs}ms audio -> ${text.length} chars in ${Date.now() - startedAt}ms`);
 			// Whisper emits punctuation-only or bracketed noise for non-speech audio.
 			if (!text || /^[\s.,!?\-–—'"«»()[\]]*$/.test(text)) {
 				return;
