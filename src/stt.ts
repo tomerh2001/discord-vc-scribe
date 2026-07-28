@@ -4,13 +4,17 @@ import {config} from './config.js';
  * Send a WAV buffer to an OpenAI-compatible `/v1/audio/transcriptions`
  * endpoint (speaches, faster-whisper-server, or the real OpenAI API).
  */
-export async function transcribe(wav: Buffer): Promise<string> {
+export async function transcribe(wav: Buffer, prompt?: string): Promise<string> {
 	const form = new FormData();
 	form.append('file', new Blob([new Uint8Array(wav)], {type: 'audio/wav'}), 'audio.wav');
 	form.append('model', config.sttModel);
 	form.append('response_format', 'json');
 	if (config.sttLanguage) {
 		form.append('language', config.sttLanguage);
+	}
+
+	if (prompt) {
+		form.append('prompt', prompt);
 	}
 
 	const response = await fetch(new URL('/v1/audio/transcriptions', config.sttUrl), {

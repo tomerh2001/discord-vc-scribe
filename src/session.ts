@@ -7,7 +7,7 @@ import {
 } from '@discordjs/voice';
 import type {Client, VoiceBasedChannel, VoiceState} from 'discord.js';
 import prism from 'prism-media';
-import {pcmDurationMs, pcmToWav16kMono} from './audio.js';
+import {pcmDurationMs, pcmToWavMono} from './audio.js';
 import {config} from './config.js';
 import {
 	loadAssignments,
@@ -18,10 +18,37 @@ import {
 import {transcribe} from './stt.js';
 
 const REJOIN_DELAY_MS = 5000;
+const CONTEXT_LINES = 4;
+const CONTEXT_MAX_CHARS = 300;
+
+// Whisper's stock hallucinations on breath/noise segments, normalized to
+// lowercase without punctuation. Only applied to short segments.
+const HALLUCINATIONS = new Set([
+	'thank you',
+	'thanks for watching',
+	'thank you for watching',
+	'thank you so much for watching',
+	'please subscribe',
+	'subtitles by the amaraorg community',
+	'you',
+	'תודה',
+	'תודה רבה',
+	'תודה שצפיתם',
+]);
+
+function isLikelyHallucination(text: string, durationMs: number): boolean {
+	if (durationMs >= 3000) {
+		return false;
+	}
+
+	const normalized = text.toLowerCase().replaceAll(/[^\p{L}\p{N} ]/gu, '').replaceAll(/\s+/g, ' ').trim();
+	return HALLUCINATIONS.has(normalized);
+}
 
 export class TranscriberSession {
 	private connection: VoiceConnection | undefined;
 	private readonly capturing = new Set<string>();
+	private readonly recentLines: string[] = [];
 	private deafened = false;
 	private destroyed = false;
 	private sendQueue: Promise<unknown> = Promise.resolve();
@@ -281,14 +308,25 @@ export class TranscriberSession {
 
 		try {
 			const startedAt = Date.now();
-			const text = (await transcribe(pcmToWav16kMono(pcm))).trim();
+			// Recent conversation lines prime the model for names and jargon.
+			const prompt = this.recentLines.join(' ').slice(-CONTEXT_MAX_CHARS) || undefined;
+			const text = (await transcribe(pcmToWavMono(pcm), prompt)).trim();
 			console.log(`[stt:${this.assignment.guildId}] ${userId}: ${durationMs}ms audio -> ${text.length} chars in ${Date.now() - startedAt}ms`);
 			// Whisper emits punctuation-only or bracketed noise for non-speech audio.
 			if (!text || /^[\s.,!?\-–—'"«»()[\]]*$/.test(text)) {
 				return;
 			}
 
+			if (isLikelyHallucination(text, durationMs)) {
+				console.log(`[stt:${this.assignment.guildId}] ${userId}: dropped likely hallucination: "${text}"`);
+				return;
+			}
+
 			this.log(`<@${userId}> ${text}`.slice(0, 1990));
+			this.recentLines.push(text);
+			if (this.recentLines.length > CONTEXT_LINES) {
+				this.recentLines.shift();
+			}
 		} catch (error) {
 			console.error(`[stt:${this.assignment.guildId}]`, error);
 		}
