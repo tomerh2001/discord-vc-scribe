@@ -88,6 +88,7 @@ All via `.env` (see [.env.example](.env.example)):
 | `STT_URL` | `http://localhost:8000` | OpenAI-compatible STT server |
 | `STT_MODEL` | `Systran/faster-whisper-small` | Whisper model (`medium`/`large-v3` w/ GPU) |
 | `STT_LANGUAGE` | auto-detect | Language hint, e.g. `en`, `he` |
+| `ALLOWED_GUILD_IDS` | allow all | Comma-separated server IDs; bot leaves any other server |
 | `SILENCE_MS` | `1200` | Pause that ends a sentence |
 | `MIN_SPEECH_MS` | `600` | Discard shorter blips |
 | `MAX_SEGMENT_MS` | `45000` | Flush long monologues in chunks |

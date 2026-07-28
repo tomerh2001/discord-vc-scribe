@@ -16,6 +16,11 @@ export const config = {
 	sttModel: process.env.STT_MODEL ?? 'Systran/faster-whisper-small',
 	/** Optional ISO 639-1 language hint (e.g. "en", "he"). Leave unset for auto-detect. */
 	sttLanguage: process.env.STT_LANGUAGE || undefined,
+	/** Comma-separated guild IDs allowed to use the bot; it leaves any other guild. Empty = allow all. */
+	allowedGuildIds: (process.env.ALLOWED_GUILD_IDS ?? '')
+		.split(',')
+		.map(id => id.trim())
+		.filter(Boolean),
 	/** Segments shorter than this are discarded as noise. */
 	minSpeechMs: Number(process.env.MIN_SPEECH_MS ?? 600),
 	/** How long a pause ends a speech segment. */
