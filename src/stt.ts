@@ -35,6 +35,9 @@ export async function transcribe(wav: Buffer): Promise<Transcription> {
 	const response = await fetch(new URL('/v1/audio/transcriptions', config.sttUrl), {
 		method: 'POST',
 		body: form,
+		// A wedged STT server must fail fast — otherwise requests pile up and
+		// the bot "types" forever without posting anything.
+		signal: AbortSignal.timeout(90_000),
 	});
 
 	if (!response.ok) {
