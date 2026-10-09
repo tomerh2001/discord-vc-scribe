@@ -6,14 +6,22 @@ import {
 	type VoiceConnection,
 } from '@discordjs/voice';
 import type {Client, VoiceBasedChannel, VoiceState} from 'discord.js';
+import type {Transform} from 'node:stream';
 import prism from 'prism-media';
 import {pcmDurationMs, pcmToWavMono} from './audio.js';
 import {config} from './config.js';
 import type {Assignment} from './state.js';
 import {transcribe} from './stt.js';
 
-const REJOIN_DELAY_MS = 5000;
 const TYPING_REFRESH_MS = 8000;
+
+/** Selection changed during an asynchronous lookup or connection handshake. */
+export class SessionSelectionChangedError extends Error {
+	constructor() {
+		super('The selected voice channel changed before its connection was ready.');
+		this.name = 'SessionSelectionChangedError';
+	}
+}
 
 // Whisper's stock hallucinations on breath/noise segments, normalized to
 // lowercase without punctuation. Only applied to short segments.
@@ -44,6 +52,10 @@ type SessionDependencies = {
 	waitForReady: (connection: VoiceConnection) => Promise<unknown>;
 	transcribe: typeof transcribe;
 	labelSource: (logChannelId: string) => boolean;
+	onConnectionLost: () => void;
+	isSelected: () => boolean;
+	createDecoder: () => Transform;
+	flushTimeoutMs: number;
 };
 
 export class TranscriberSession {
@@ -53,16 +65,18 @@ export class TranscriberSession {
 	private readonly dependencies: SessionDependencies;
 	private deafened = false;
 	private destroyed = false;
-	private parked = false;
+	private stopping = false;
 	private connecting = false;
 	private problem: string | undefined;
 	private logProblem: string | undefined;
 	private epoch = 0;
 	private sendQueue: Promise<void> = Promise.resolve();
 	private lifecycle: Promise<void> = Promise.resolve();
+	private readonly pendingSegments = new Set<Promise<void>>();
+	private stopPromise: Promise<void> | undefined;
+	private cancelDrain: (() => void) | undefined;
 	private activeWork = 0;
 	private typingTimer: NodeJS.Timeout | undefined;
-	private rejoinTimer: NodeJS.Timeout | undefined;
 	readonly assignment: Assignment;
 
 	constructor(
@@ -76,14 +90,18 @@ export class TranscriberSession {
 			waitForReady: async connection => entersState(connection, VoiceConnectionStatus.Ready, 30_000),
 			transcribe,
 			labelSource: () => false,
+			onConnectionLost: () => undefined,
+			isSelected: () => true,
+			createDecoder: () => new prism.opus.Decoder({rate: 48_000, channels: 2, frameSize: 960}),
+			flushTimeoutMs: 3000,
 			...dependencies,
 		};
 	}
 
 	get state(): string {
 		if (this.destroyed) return 'stopped';
+		if (this.stopping) return 'stopping';
 		if (this.error) return 'error';
-		if (this.parked) return 'parked';
 		if (this.connecting || !this.connection || this.connection.state.status !== VoiceConnectionStatus.Ready) return 'connecting';
 		return this.deafened ? 'paused' : 'listening';
 	}
@@ -97,14 +115,25 @@ export class TranscriberSession {
 	}
 
 	async start(announce: boolean): Promise<void> {
-		await this.reconcile();
+		try {
+			await this.reconcile();
+		} catch (error) {
+			if (this.destroyed || this.stopping) throw new SessionSelectionChangedError();
+			throw error;
+		}
+		// A manager stop can interrupt an awaited lookup before join() is reached.
+		// Reporting success here would make that stopped worker appear active and
+		// could drop the manager's pending direct-move cleanup obligation.
+		if (this.destroyed || this.stopping || !this.connection || !this.dependencies.isSelected()) {
+			this.stopping = true;
+			this.invalidateAudio();
+			throw new SessionSelectionChangedError();
+		}
 		if (announce) await this.announceAssignment();
 	}
 
 	async announceAssignment(): Promise<void> {
-		const suffix = this.parked
-			? ' The channel is empty, so I will join when someone arrives.'
-			: (this.deafened ? ' I am currently deafened, so transcription is paused.' : '');
+		const suffix = this.deafened ? ' I am currently deafened, so transcription is paused.' : '';
 		this.log(`📌 Assigned to <#${this.assignment.voiceChannelId}>. Logging this call here.${suffix}`);
 		await this.sendQueue;
 	}
@@ -116,50 +145,88 @@ export class TranscriberSession {
 		this.assignment.logChannelId = logChannelId;
 	}
 
-	async stop(announce: boolean): Promise<void> {
-		if (this.destroyed) {
-			await this.sendQueue;
+	async stop(
+		announce: boolean,
+		{flushFinalAudio = false, disconnect = true}: {flushFinalAudio?: boolean; disconnect?: boolean} = {},
+	): Promise<void> {
+		if (this.stopPromise) {
+			if (!flushFinalAudio) {
+				this.destroyed = true;
+				this.invalidateAudio();
+				this.cancelDrain?.();
+			}
+			await this.stopPromise;
 			return;
 		}
-		this.destroyed = true;
-		this.invalidateAudio();
-		this.destroyConnection();
-		this.clearRetry();
-		if (announce) this.log('👋 Unassigned. Leaving the call.', undefined, true);
-		// Any send already handed to Discord finishes before this worker is reused.
-		await this.sendQueue;
+		this.stopping = true;
+		if (flushFinalAudio && !this.deafened) {
+			// Seal each buffer while its original connection and destination are valid.
+			for (const finish of [...this.activeCaptures]) finish(true);
+		} else {
+			this.destroyed = true;
+			this.invalidateAudio();
+		}
+		this.destroyConnection(disconnect);
+		this.stopPromise = (async () => {
+			if (!this.destroyed && this.pendingSegments.size > 0) {
+				let timer: NodeJS.Timeout | undefined;
+				try {
+					await Promise.race([
+						Promise.allSettled([...this.pendingSegments]),
+						new Promise<void>(resolve => {
+							this.cancelDrain = resolve;
+							timer = setTimeout(resolve, Math.max(0, Math.min(3000, this.dependencies.flushTimeoutMs)));
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+					this.cancelDrain = undefined;
+				}
+			}
+			// Flush queued final transcripts before invalidating their epoch. Once the
+			// deadline expires, unfinished STT is discarded and can never publish later.
+			if (this.pendingSegments.size === 0 && !this.destroyed) await this.sendQueue;
+			this.destroyed = true;
+			this.invalidateAudio();
+			if (announce) this.log('👋 Unassigned. Leaving the call.', undefined, true);
+			// A send already handed to Discord finishes before this worker is reused.
+			await this.sendQueue;
+		})();
+		await this.stopPromise;
 	}
 
 	onVoiceStateUpdate(oldState: VoiceState, newState: VoiceState): void {
 		if (this.destroyed) return;
 		if (newState.id === this.client.user?.id) {
-			this.onOwnVoiceStateUpdate(newState);
+			this.onOwnVoiceStateUpdate(oldState, newState);
 			return;
 		}
+		if (this.stopping) return;
 		if (newState.member?.user.bot ?? oldState.member?.user.bot) return;
 		const vcId = this.assignment.voiceChannelId;
 		const joined = newState.channelId === vcId && oldState.channelId !== vcId;
 		const left = oldState.channelId === vcId && newState.channelId !== vcId;
 		if (joined) this.log(`➡️ <@${newState.id}> joined the call.`);
 		if (left) this.log(`⬅️ <@${newState.id}> left the call.`);
-		if (joined || left) this.scheduleReconcile();
 	}
 
-	private onOwnVoiceStateUpdate(state: VoiceState): void {
+	private onOwnVoiceStateUpdate(oldState: VoiceState, state: VoiceState): void {
+		if (this.stopping) {
+			if (state.channelId === this.assignment.voiceChannelId && state.deaf) {
+				this.deafened = true;
+				this.invalidateAudio();
+				this.cancelDrain?.();
+			}
+			return;
+		}
 		if (state.channelId && state.channelId !== this.assignment.voiceChannelId) {
+			if (oldState.channelId !== this.assignment.voiceChannelId) return;
 			// A manual move is not authorization to record a different room.
-			this.invalidateAudio();
-			this.destroyConnection();
-			this.log(`📌 Assigned to <#${this.assignment.voiceChannelId}>. Returning to that channel.`);
-			this.scheduleReconcile();
+			this.connectionLost();
 			return;
 		}
 		if (!state.channelId) {
-			if (!this.parked) {
-				this.invalidateAudio();
-				this.destroyConnection();
-				this.scheduleRetry();
-			}
+			if (oldState.channelId === this.assignment.voiceChannelId) this.connectionLost();
 			return;
 		}
 		const isDeaf = Boolean(state.deaf);
@@ -179,35 +246,21 @@ export class TranscriberSession {
 		return channel;
 	}
 
-	private scheduleReconcile(): void {
-		void this.reconcile().catch(error => {
-			console.error(`[voice:${this.assignment.guildId}:${this.assignment.voiceChannelId}]`, error);
-			if (!this.destroyed) {
-				this.problem = 'Could not connect to the assigned voice channel. Retrying automatically.';
-				this.scheduleRetry();
-			}
-		});
+	private connectionLost(): void {
+		if (this.destroyed || this.stopping || !this.connection) return;
+		this.invalidateAudio();
+		this.destroyConnection();
+		this.problem = 'Voice connection lost. Waiting to reconnect.';
+		this.dependencies.onConnectionLost();
 	}
 
 	private async reconcile(): Promise<void> {
 		const pending = this.lifecycle.catch(() => undefined).then(async () => {
-			if (this.destroyed) return;
+			if (this.destroyed || this.stopping) return;
 			const channel = await this.fetchVoiceChannel();
-			if (this.destroyed) return;
-			if (!channel.members.some(member => !member.user.bot)) {
-				const wasConnected = Boolean(this.connection);
-				this.parked = true;
-				this.problem = undefined;
-				// Finish the last words of the call even if the last speaker has left.
-				for (const finish of [...this.activeCaptures]) finish(true);
-				this.destroyConnection();
-				this.clearRetry();
-				if (wasConnected) this.log('💤 Everyone left. Waiting until someone joins.');
-				return;
-			}
-			this.parked = false;
+			if (this.destroyed || this.stopping) return;
 			const me = await channel.guild.members.fetchMe();
-			if (this.destroyed) return;
+			if (this.destroyed || this.stopping) return;
 			const nextDeafened = Boolean(me.voice.channelId === channel.id && me.voice.deaf);
 			if (nextDeafened !== this.deafened) this.invalidateAudio();
 			this.deafened = nextDeafened;
@@ -219,16 +272,33 @@ export class TranscriberSession {
 	}
 
 	private async join(channel: VoiceBasedChannel): Promise<void> {
-		if (this.destroyed || this.connection) return;
-		this.clearRetry();
+		if (this.destroyed || this.stopping || this.connection) return;
+		// Channel and member fetches above can outlive a follow/occupancy change.
+		// Nothing asynchronous may intervene between this check and the join.
+		if (!this.dependencies.isSelected()) throw new SessionSelectionChangedError();
 		this.connecting = true;
 		let connection: VoiceConnection;
 		try {
 			connection = this.dependencies.join({
 				channelId: channel.id,
 				guildId: channel.guild.id,
-				adapterCreator: channel.guild.voiceAdapterCreator,
-				// The library otherwise shares one connection across all clients in a guild.
+				adapterCreator: methods => {
+					const adapter = channel.guild.voiceAdapterCreator(methods);
+					let joined = false;
+					return {
+						...adapter,
+						sendPayload: payload => {
+							if (payload.d.channel_id !== null) {
+								// @discordjs/voice otherwise retries joins internally. The
+								// manager must choose whether this room is still eligible.
+								if (joined || this.stopping || this.destroyed) return false;
+								joined = true;
+							}
+							return adapter.sendPayload(payload);
+						},
+					};
+				},
+				// Keep this client's connection isolated from other clients in this process.
 				group: this.client.user!.id,
 				selfDeaf: false,
 				selfMute: true,
@@ -251,51 +321,37 @@ export class TranscriberSession {
 			console.error(`[voice:${this.assignment.guildId}:${this.assignment.voiceChannelId}]`, error);
 		});
 		connection.on(VoiceConnectionStatus.Disconnected, () => {
-			if (this.connection !== connection || this.destroyed) return;
-			this.invalidateAudio();
-			void Promise.race([
-				entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-				entersState(connection, VoiceConnectionStatus.Connecting, 5000),
-			]).catch(() => {
-				if (this.connection !== connection || this.destroyed) return;
-				this.destroyConnection();
-				this.scheduleRetry();
-			});
+			if (this.connection === connection) this.connectionLost();
 		});
 		try {
 			await this.dependencies.waitForReady(connection);
 			if (this.destroyed || this.connection !== connection) throw new Error('Voice connection was interrupted.');
+			if (!this.dependencies.isSelected()) {
+				this.stopping = true;
+				this.invalidateAudio();
+				throw new SessionSelectionChangedError();
+			}
 			this.problem = undefined;
 		} catch (error) {
-			if (this.connection === connection) this.destroyConnection();
+			// The manager decides whether cancellation needs a direct move or leave.
+			if (!(error instanceof SessionSelectionChangedError) && this.connection === connection) this.destroyConnection();
 			throw error;
 		} finally {
 			if (this.connection === connection || !this.connection) this.connecting = false;
 		}
 	}
 
-	private destroyConnection(): void {
+	private destroyConnection(disconnect = true): void {
 		const connection = this.connection;
 		this.connection = undefined;
 		this.connecting = false;
 		try {
-			connection?.destroy();
+			// A handoff closes local audio without leaving the old room first. The
+			// replacement session's join then moves this account directly to its room.
+			connection?.destroy(disconnect);
 		} catch {
 			// Already destroyed.
 		}
-	}
-
-	private clearRetry(): void {
-		if (this.rejoinTimer) clearTimeout(this.rejoinTimer);
-		this.rejoinTimer = undefined;
-	}
-
-	private scheduleRetry(): void {
-		if (this.destroyed || this.parked || this.rejoinTimer) return;
-		this.rejoinTimer = setTimeout(() => {
-			this.rejoinTimer = undefined;
-			this.scheduleReconcile();
-		}, REJOIN_DELAY_MS);
 	}
 
 	private invalidateAudio(): void {
@@ -313,13 +369,13 @@ export class TranscriberSession {
 
 	private async captureUser(userId: string, connection: VoiceConnection): Promise<void> {
 		const epoch = this.epoch;
-		if (!this.audioIsCurrent(epoch, connection) || this.capturing.has(userId)) return;
+		if (this.stopping || !this.dependencies.isSelected() || !this.audioIsCurrent(epoch, connection) || this.capturing.has(userId)) return;
 		// Reserve before fetching the user: duplicate speaking events can overlap the fetch.
 		this.capturing.set(userId, epoch);
 		try {
 			const user = await this.client.users.fetch(userId).catch(() => null);
 			if (!user || user.bot || !this.audioIsCurrent(epoch, connection)) return;
-			while (this.audioIsCurrent(epoch, connection)) {
+			while (!this.stopping && this.dependencies.isSelected() && this.audioIsCurrent(epoch, connection)) {
 				await this.captureSegment(userId, epoch, connection);
 				if (!connection.receiver.speaking.users.has(userId)) break;
 			}
@@ -356,16 +412,16 @@ export class TranscriberSession {
 	}
 
 	private async captureSegment(userId: string, epoch: number, connection: VoiceConnection): Promise<void> {
-		if (!this.audioIsCurrent(epoch, connection)) return;
+		if (this.stopping || !this.dependencies.isSelected() || !this.audioIsCurrent(epoch, connection)) return;
 		this.beginWork();
 		try {
 			await new Promise<void>((resolve, reject) => {
 				const opusStream = connection.receiver.subscribe(userId, {
 					end: {behavior: EndBehaviorType.AfterSilence, duration: config.silenceMs},
 				});
-				let decoder: prism.opus.Decoder;
+				let decoder: Transform;
 				try {
-					decoder = new prism.opus.Decoder({rate: 48_000, channels: 2, frameSize: 960});
+					decoder = this.dependencies.createDecoder();
 				} catch (error) {
 					opusStream.destroy();
 					reject(error);
@@ -414,6 +470,16 @@ export class TranscriberSession {
 	}
 
 	private async finishSegment(userId: string, pcm: Buffer, epoch: number): Promise<void> {
+		const pending = this.transcribeSegment(userId, pcm, epoch);
+		this.pendingSegments.add(pending);
+		try {
+			await pending;
+		} finally {
+			this.pendingSegments.delete(pending);
+		}
+	}
+
+	private async transcribeSegment(userId: string, pcm: Buffer, epoch: number): Promise<void> {
 		try {
 			if (!this.audioIsCurrent(epoch)) return;
 			const durationMs = Math.round(pcmDurationMs(pcm));

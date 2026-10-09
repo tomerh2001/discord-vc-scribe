@@ -1,7 +1,7 @@
 {
   "name": "discord-vc-scribe",
   "version": "0.1.0",
-  "description": "Discord voice transcription with independent channel assignments and concurrent bot workers.",
+  "description": "Discord voice transcription with configurable room destinations and optional person-following priority.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

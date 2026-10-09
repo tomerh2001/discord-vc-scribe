@@ -12,6 +12,7 @@ type Response = {method: string; content?: string; flags?: number; allowedMentio
 function interaction(command: string, options: {
 	manage?: boolean; voiceId?: string; voiceType?: ChannelType; logType?: ChannelType; hidden?: string;
 	threadMember?: boolean; manageThreads?: boolean;
+	targetId?: string; targetBot?: boolean; targetMissing?: boolean;
 } = {}) {
 	const messages: Response[] = [];
 	const instance = {
@@ -21,7 +22,10 @@ function interaction(command: string, options: {
 		inGuild: () => true,
 		memberPermissions: {has: (permission: bigint) => permission === PermissionFlagsBits.ManageGuild && options.manage !== false},
 		guild: {
-			members: {fetch: async () => ({id: 'admin'})},
+			members: {fetch: async (id: string) => {
+				if (id !== 'admin' && options.targetMissing) throw new Error('Unknown member');
+				return {id, user: {id, bot: options.targetBot ?? false}};
+			}},
 			channels: {fetch: async (id: string) => ({
 				type: id === 'log' ? options.logType ?? ChannelType.GuildText : options.voiceType ?? ChannelType.GuildVoice,
 				permissionsFor: () => ({has: (permission: bigint) => id !== options.hidden
@@ -31,6 +35,7 @@ function interaction(command: string, options: {
 		},
 		options: {
 			getSubcommand: () => command,
+			getUser: () => ({id: options.targetId ?? 'person', bot: options.targetBot ?? false}),
 			getChannel: (name: string) => name === 'voice_channel'
 				? {id: options.voiceId ?? 'voice', type: options.voiceType ?? ChannelType.GuildVoice}
 				: {id: 'log', type: options.logType ?? ChannelType.GuildText},
@@ -45,14 +50,16 @@ function interaction(command: string, options: {
 	return {value: instance as unknown as Interaction, messages};
 }
 
-function sessions(initial: AssignmentStatus[] = []) {
+function sessions(initial: AssignmentStatus[] = [], initialFollow?: string) {
 	let records = [...initial];
 	const assigned: Assignment[] = [];
 	const removed: [string, string][] = [];
+	const followUpdates: [string, string | undefined][] = [];
+	const followed = new Map(initialFollow ? [['guild', initialFollow]] : []);
 	const manager: CommandSessions = {
 		async assign(assignment) {
 			assigned.push(assignment);
-			records.push({assignment, state: 'parked', isDeafened: false, botId: 'bot'});
+			records.push({assignment, state: 'idle', isDeafened: false});
 		},
 		async unassign(guildId, voiceId) {
 			removed.push([guildId, voiceId]);
@@ -61,9 +68,14 @@ function sessions(initial: AssignmentStatus[] = []) {
 			return records.length !== count;
 		},
 		list(guildId) {return records.filter(row => row.assignment.guildId === guildId);},
-		capacity() {return {total: 3, used: records.length};},
+		async setFollow(guildId, userId) {
+			followUpdates.push([guildId, userId]);
+			if (userId) followed.set(guildId, userId);
+			else followed.delete(guildId);
+		},
+		getFollow(guildId) {return followed.get(guildId);},
 	};
-	return {manager, assigned, removed};
+	return {manager, assigned, removed, followUpdates};
 }
 
 function record(voice: string, extra: Partial<AssignmentStatus> = {}): AssignmentStatus {
@@ -74,6 +86,8 @@ test('commands require an explicit voice channel for unassign and expose voice c
 	const options = commandData[0].options as Array<{name: string; options?: Array<{name: string; required?: boolean; channel_types?: number[]}>}>;
 	const unassign = options.find(option => option.name === 'unassign')!;
 	assert.equal(unassign.options?.find(option => option.name === 'voice_channel')?.required, true);
+	assert.equal(options.find(option => option.name === 'follow')?.options?.find(option => option.name === 'user')?.required, true);
+	assert.ok(options.some(option => option.name === 'unfollow'));
 	const destination = options.find(option => option.name === 'assign')?.options?.find(option => option.name === 'log_channel');
 	for (const type of [ChannelType.GuildVoice, ChannelType.GuildStageVoice, ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.GuildAnnouncement]) {
 		assert.ok(destination?.channel_types?.includes(type));
@@ -81,7 +95,7 @@ test('commands require an explicit voice channel for unassign and expose voice c
 });
 
 test('Manage Server is enforced at runtime for every command', async () => {
-	for (const command of ['assign', 'unassign', 'status']) {
+	for (const command of ['assign', 'unassign', 'follow', 'unfollow', 'status']) {
 		const fake = interaction(command, {manage: false});
 		const state = sessions();
 		await handleInteraction(fake.value, state.manager);
@@ -89,6 +103,7 @@ test('Manage Server is enforced at runtime for every command', async () => {
 		assert.equal(fake.messages[0].flags, MessageFlags.Ephemeral);
 		assert.equal(state.assigned.length, 0);
 		assert.equal(state.removed.length, 0);
+		assert.equal(state.followUpdates.length, 0);
 	}
 });
 
@@ -96,11 +111,15 @@ test('the guild allowlist also rejects interactions at runtime', async () => {
 	const previous = [...config.allowedGuildIds];
 	config.allowedGuildIds.splice(0, config.allowedGuildIds.length, 'another-guild');
 	try {
-		const fake = interaction('assign');
-		const state = sessions();
-		await handleInteraction(fake.value, state.manager);
-		assert.match(fake.messages[0].content!, /not enabled/);
-		assert.equal(state.assigned.length, 0);
+		for (const command of ['assign', 'unassign', 'follow', 'unfollow', 'status']) {
+			const fake = interaction(command);
+			const state = sessions();
+			await handleInteraction(fake.value, state.manager);
+			assert.match(fake.messages[0].content!, /not enabled/);
+			assert.equal(state.assigned.length, 0);
+			assert.equal(state.removed.length, 0);
+			assert.equal(state.followUpdates.length, 0);
+		}
 	} finally {
 		config.allowedGuildIds.splice(0, config.allowedGuildIds.length, ...previous);
 	}
@@ -112,7 +131,7 @@ test('assign accepts every supported transcript destination without replacing ot
 		const fake = interaction('assign', {voiceId: `voice-${type}`, logType: type});
 		await handleInteraction(fake.value, state.manager);
 		assert.equal(fake.messages[0].flags, MessageFlags.Ephemeral);
-		assert.match(fake.messages.at(-1)!.content!, /parked/);
+		assert.match(fake.messages.at(-1)!.content!, /idle/);
 	}
 	assert.equal(state.assigned.length, 7);
 	assert.ok(state.manager.list('guild').some(row => row.assignment.voiceChannelId === 'existing'));
@@ -160,13 +179,58 @@ test('unassign removes only the selected voice channel', async () => {
 	assert.match(fake.messages.at(-1)!.content!, /Removed.*second/);
 });
 
-test('status reports real session states and unused bot capacity', async () => {
+test('status reports active, waiting, idle, and paused mappings with following off by default', async () => {
 	const fake = interaction('status');
-	const state = sessions([record('parked', {state: 'parked'}), record('paused', {isDeafened: true})]);
+	const state = sessions([
+		record('current', {state: 'listening'}), record('empty', {state: 'idle'}),
+		record('queued', {state: 'waiting'}), record('paused', {isDeafened: true}),
+	]);
 	await handleInteraction(fake.value, state.manager);
-	assert.match(fake.messages[0].content!, /2\/3 assigned \(1 available\)/);
-	assert.match(fake.messages[0].content!, /<#parked>.*parked/);
+	assert.match(fake.messages[0].content!, /Follow: off/);
+	assert.match(fake.messages[0].content!, /One call at a time/);
+	assert.match(fake.messages[0].content!, /<#current>.*active/);
+	assert.match(fake.messages[0].content!, /<#empty>.*idle/);
+	assert.match(fake.messages[0].content!, /<#queued>.*waiting/);
 	assert.match(fake.messages[0].content!, /<#paused>.*paused \(deafened\)/);
+	assert.equal(fake.messages[0].flags, MessageFlags.Ephemeral);
+});
+
+test('follow selects a server member, shows the saved target, and keeps replies ephemeral', async () => {
+	const fake = interaction('follow', {targetId: 'person'});
+	const state = sessions([record('current')]);
+	await handleInteraction(fake.value, state.manager);
+	assert.deepEqual(state.followUpdates, [['guild', 'person']]);
+	assert.match(fake.messages.at(-1)!.content!, /Following <@person>.*mapped channel takes priority/);
+	assert.equal(fake.messages[0].flags, MessageFlags.Ephemeral);
+	assert.deepEqual(fake.messages.at(-1)!.allowedMentions, {parse: []});
+	const status = interaction('status');
+	await handleInteraction(status.value, state.manager);
+	assert.match(status.messages[0].content!, /Follow: <@person> \(watched channels only\)/);
+});
+
+test('follow rejects bot accounts and people outside this server without changing the saved target', async t => {
+	t.mock.method(console, 'error', () => undefined);
+	for (const options of [{targetBot: true}, {targetMissing: true}]) {
+		const fake = interaction('follow', options);
+		const state = sessions([], 'existing-person');
+		await handleInteraction(fake.value, state.manager);
+		assert.deepEqual(state.followUpdates, []);
+		assert.equal(state.manager.getFollow('guild'), 'existing-person');
+		assert.match(fake.messages.at(-1)!.content!, /Choose a person/);
+	}
+});
+
+test('unfollow clears only the priority override and leaves mappings intact', async () => {
+	const fake = interaction('unfollow');
+	const rows = [record('current'), record('waiting', {state: 'waiting'})];
+	const state = sessions(rows, 'person');
+	await handleInteraction(fake.value, state.manager);
+	assert.deepEqual(state.followUpdates, [['guild', undefined]]);
+	assert.equal(state.manager.getFollow('guild'), undefined);
+	assert.deepEqual(state.manager.list('guild'), rows);
+	assert.deepEqual(state.removed, []);
+	assert.deepEqual(state.assigned, []);
+	assert.match(fake.messages.at(-1)!.content!, /stay with the current call/);
 	assert.equal(fake.messages[0].flags, MessageFlags.Ephemeral);
 });
 
@@ -185,10 +249,10 @@ test('large status lists retain all assignments and long errors across bounded e
 	assert.equal(combined.replaceAll(/[^e]/g, '').length >= 3000, true);
 });
 
-test('capacity and permission errors are actionable; unexpected errors never expose secrets', async t => {
+test('permission errors are actionable; unexpected errors never expose secrets', async t => {
 	const logged: unknown[][] = [];
 	t.mock.method(console, 'error', (...args: unknown[]) => logged.push(args));
-	const safeMessage = 'No free voice bot is available. Add another worker or unassign a channel.';
+	const safeMessage = 'The bot needs View Channel and Connect in the selected voice channel.';
 	for (const error of [new AssignmentError(safeMessage), new Error('secret-token-response')]) {
 		const fake = interaction('assign');
 		const state = sessions();
@@ -205,7 +269,7 @@ test('long actionable errors are split without losing diagnostics', async t => {
 	t.mock.method(console, 'error', () => undefined);
 	const fake = interaction('assign');
 	const state = sessions();
-	const message = 'Permission denied for this worker. '.repeat(140);
+	const message = 'Permission denied for this bot. '.repeat(140);
 	state.manager.assign = async () => {throw new AssignmentError(message);};
 	await handleInteraction(fake.value, state.manager);
 	const replies = fake.messages.filter(reply => reply.method !== 'defer');

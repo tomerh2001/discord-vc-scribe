@@ -21,7 +21,7 @@ const logTypes = [
 	ChannelType.AnnouncementThread,
 ] as const;
 
-type CommandSessions = Pick<SessionManager, 'assign' | 'unassign' | 'list' | 'capacity'>;
+type CommandSessions = Pick<SessionManager, 'assign' | 'unassign' | 'list' | 'setFollow' | 'getFollow'>;
 
 export const commandData = [
 	new SlashCommandBuilder()
@@ -31,10 +31,10 @@ export const commandData = [
 		.setContexts(InteractionContextType.Guild)
 		.addSubcommand(sub => sub
 			.setName('assign')
-			.setDescription('Assign a voice channel to a transcript destination')
+			.setDescription('Watch a voice channel and save its transcript destination')
 			.addChannelOption(option => option
 				.setName('voice_channel')
-				.setDescription('Voice channel to transcribe')
+				.setDescription('Voice channel to watch for an active call')
 				.addChannelTypes(...voiceTypes)
 				.setRequired(true))
 			.addChannelOption(option => option
@@ -51,8 +51,18 @@ export const commandData = [
 				.addChannelTypes(...voiceTypes)
 				.setRequired(true)))
 		.addSubcommand(sub => sub
+			.setName('follow')
+			.setDescription('Give one person priority when choosing a watched voice channel')
+			.addUserOption(option => option
+				.setName('user')
+				.setDescription('Person to follow between watched voice channels')
+				.setRequired(true)))
+		.addSubcommand(sub => sub
+			.setName('unfollow')
+			.setDescription('Turn off following without interrupting the current call'))
+		.addSubcommand(sub => sub
 			.setName('status')
-			.setDescription('Show all assignments and available bots in this server'))
+			.setDescription('Show watched channels, their current state, and the follow target'))
 		.toJSON(),
 ];
 
@@ -92,22 +102,47 @@ export async function handleInteraction(interaction: Interaction, sessions: Comm
 				break;
 			}
 
+			case 'follow': {
+				await interaction.deferReply({flags: MessageFlags.Ephemeral});
+				const user = interaction.options.getUser('user', true);
+				const guild = interaction.guild ?? await interaction.client.guilds.fetch(interaction.guildId);
+				const member = await guild.members.fetch(user.id).catch(() => null);
+				if (!member) {
+					throw new AssignmentError('Choose a person who is a member of this server.');
+				}
+				if (user.bot || member.user.bot) {
+					throw new AssignmentError('Choose a person to follow. Bot accounts cannot be follow targets.');
+				}
+				await sessions.setFollow(interaction.guildId, member.id);
+				await interaction.editReply({
+					content: `Following <@${member.id}> within watched voice channels. Their mapped channel takes priority. Use \`/scribe unfollow\` to turn this off.`,
+					allowedMentions: {parse: []},
+				});
+				break;
+			}
+
+			case 'unfollow': {
+				await interaction.deferReply({flags: MessageFlags.Ephemeral});
+				await sessions.setFollow(interaction.guildId, undefined);
+				await interaction.editReply('Follow is off. The bot will stay with the current call while people remain.');
+				break;
+			}
+
 			case 'status': {
-				const capacity = sessions.capacity(interaction.guildId);
-				const lines = [
-					`Bots in this server: ${capacity.used}/${capacity.total} assigned (${Math.max(0, capacity.total - capacity.used)} available).`,
-					'Each simultaneous voice channel in a server needs its own bot account.',
-				];
+				const followed = sessions.getFollow(interaction.guildId);
 				const assignments = sessions.list(interaction.guildId);
+				const lines = [
+					`Follow: ${followed ? `<@${followed}> (watched channels only)` : 'off'}.`,
+					`Watching ${assignments.length} voice channel${assignments.length === 1 ? '' : 's'}. One call at a time in this server.`,
+				];
 				if (assignments.length === 0) {
-					lines.push('No assignments. Use `/scribe assign` to connect a voice channel and transcript destination.');
+					lines.push('Use `/scribe assign` to watch a voice channel and choose its transcript destination.');
 				}
 
 				for (const session of assignments) {
-					const {assignment, botId, state, isDeafened, error} = session;
+					const {assignment, state, isDeafened, error} = session;
 					lines.push(
-						`<#${assignment.voiceChannelId}> → <#${assignment.logChannelId}>: ${isDeafened ? 'paused (deafened)' : state}`
-						+ (botId ? `; bot <@${botId}>` : '; no bot assigned')
+						`<#${assignment.voiceChannelId}> → <#${assignment.logChannelId}>: ${describeState(state, isDeafened)}`
 						+ (error ? `\n${error}` : ''),
 					);
 				}
@@ -175,12 +210,15 @@ async function handleAssign(interaction: ChatInputCommandInteraction<'cached' | 
 
 	const session = sessions.list(interaction.guildId).find(item => item.assignment.voiceChannelId === voice.id);
 	await interaction.editReply({
-		content: `Assigned <#${voice.id}> → <#${log.id}>.`
-			+ (session?.botId ? ` Bot: <@${session.botId}>.` : '')
-			+ (session ? ` Status: ${session.isDeafened ? 'paused (deafened)' : session.state}.` : '')
-			+ `\nServer-deafen the assigned bot to pause. Use \`/scribe unassign voice_channel:\` with <#${voice.id}> to remove this assignment.`,
+		content: `Watching <#${voice.id}> → <#${log.id}>.`
+			+ (session ? ` Status: ${describeState(session.state, session.isDeafened)}.` : '')
+			+ `\nThe bot joins an occupied watched channel when idle. Server-deafen it to pause. Use \`/scribe unassign voice_channel:\` with <#${voice.id}> to remove this mapping.`,
 		allowedMentions: {parse: []},
 	});
+}
+
+function describeState(state: string, isDeafened: boolean): string {
+	return isDeafened ? 'paused (deafened)' : state === 'listening' ? 'active' : state;
 }
 
 /** Keep every status entry, including long validation errors, within Discord's message limit. */

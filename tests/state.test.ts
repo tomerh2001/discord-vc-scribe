@@ -2,14 +2,12 @@ import assert from 'node:assert/strict';
 import {closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {spawnSync} from 'node:child_process';
 import {test, type TestContext} from 'node:test';
 
 process.env.DISCORD_TOKEN = 'state-test-primary';
-process.env.DISCORD_WORKER_TOKENS = '[]';
 
 const {config} = await import('../src/config.js');
-const {assignmentKey, loadAssignments, saveAssignments, upsertAssignment, removeAssignment} = await import('../src/state.js');
+const {assignmentKey, loadAssignments, saveAssignments, upsertAssignment, removeAssignment, loadGuildSettings, saveGuildSettings, upsertGuildSettings} = await import('../src/state.js');
 type Assignment = import('../src/state.js').Assignment;
 
 const first: Assignment = {
@@ -126,41 +124,35 @@ test('failed atomic replacement removes temporary state files', t => {
 	assert.deepEqual(readdirSync(config.dataDir), ['assignments.json']);
 });
 
-function readConfig(workerTokens?: string) {
-	const env: NodeJS.ProcessEnv = {...process.env, DISCORD_TOKEN: 'primary-test-token', DOTENV_CONFIG_PATH: '/nonexistent/scribe-test.env'};
-	delete env.DISCORD_WORKER_TOKENS;
-	if (workerTokens !== undefined) {
-		env.DISCORD_WORKER_TOKENS = workerTokens;
-	}
-	return spawnSync(process.execPath, [
-		'--import', 'tsx', '--input-type=module', '--eval',
-		"const {config} = await import('./src/config.ts'); console.log(JSON.stringify(config.workerTokens));",
-	], {cwd: new URL('..', import.meta.url), env, encoding: 'utf8'});
-}
-
-test('worker token configuration defaults to empty and accepts distinct identities', () => {
-	const empty = readConfig();
-	assert.equal(empty.status, 0, empty.stderr);
-	assert.deepEqual(JSON.parse(empty.stdout), []);
-	const configured = readConfig('["worker-test-a","worker-test-b"]');
-	assert.equal(configured.status, 0, configured.stderr);
-	assert.deepEqual(JSON.parse(configured.stdout), ['worker-test-a', 'worker-test-b']);
+test('follow settings default off, survive reload, and disable without changing other guilds or routes', t => {
+	useDataDir(t);
+	assert.deepEqual(loadGuildSettings(), []);
+	saveAssignments([first, second]);
+	upsertGuildSettings({guildId: first.guildId, followUserId: '400000000000000001'});
+	upsertGuildSettings({guildId: otherGuild.guildId, followUserId: '400000000000000002'});
+	assert.equal(loadGuildSettings().find(s => s.guildId === first.guildId)?.followUserId, '400000000000000001');
+	upsertGuildSettings({guildId: first.guildId});
+	assert.deepEqual(loadGuildSettings(), [
+		{guildId: otherGuild.guildId, followUserId: '400000000000000002'},
+		{guildId: first.guildId},
+	]);
+	assert.deepEqual(loadAssignments(), [first, second]);
+	assert.equal(statSync(join(config.dataDir, 'settings.json')).mode & 0o777, 0o600);
 });
 
-test('invalid worker token configuration fails without exposing token values', () => {
-	for (const input of [
-		'not-json-secret',
-		'{}',
-		'[null]',
-		'[""]',
-		'[" worker-private-secret "]',
-		'["worker-private-secret","worker-private-secret"]',
-		'["primary-test-token"]',
-	]) {
-		const result = readConfig(input);
-		assert.notEqual(result.status, 0);
-		assert.match(result.stderr, /DISCORD_WORKER_TOKENS/);
-		assert.doesNotMatch(result.stderr, /not-json-secret|worker-private-secret|primary-test-token/);
-		assert.equal(result.stdout, '');
+test('corrupt or invalid follow settings are rejected before replacing saved state', t => {
+	useDataDir(t);
+	const path = join(config.dataDir, 'settings.json');
+	writeFileSync(path, '{invalid');
+	assert.throws(() => upsertGuildSettings({guildId: first.guildId}), /Invalid settings.json/);
+	assert.equal(readFileSync(path, 'utf8'), '{invalid');
+	for (const value of [null, {}, [null], [{guildId: first.guildId, followUserId: null}],
+		[{guildId: first.guildId, followUserId: 'not-an-id'}],
+		[{guildId: first.guildId}, {guildId: first.guildId}]]) {
+		writeFileSync(path, JSON.stringify(value));
+		assert.throws(() => loadGuildSettings(), /Invalid settings/);
 	}
+	saveGuildSettings([{guildId: first.guildId}]);
+	assert.throws(() => upsertGuildSettings({guildId: first.guildId, followUserId: '0'}), /Invalid settings/);
+	assert.deepEqual(loadGuildSettings(), [{guildId: first.guildId}]);
 });

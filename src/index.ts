@@ -3,11 +3,9 @@ import {commandData, handleInteraction} from './commands.js';
 import {config} from './config.js';
 import {SessionManager} from './session-manager.js';
 
-const tokens = [config.token, ...config.workerTokens];
-const clients = tokens.map(() => new Client({
+const client = new Client({
 	intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
-}));
-const primary = clients[0];
+});
 let sessions: SessionManager | undefined;
 let ready = false;
 let stopping = false;
@@ -17,33 +15,28 @@ function isGuildAllowed(guildId: string): boolean {
 	return config.allowedGuildIds.length === 0 || config.allowedGuildIds.includes(guildId);
 }
 
-async function prepareGuild(client: Client, guild: Guild): Promise<void> {
+async function prepareGuild(guild: Guild): Promise<void> {
 	if (!isGuildAllowed(guild.id)) {
-		console.warn(`[bot:${client.user?.id}] Leaving disallowed guild ${guild.id}.`);
-		await guild.leave().catch(() => console.error(`[bot:${client.user?.id}] Could not leave disallowed guild ${guild.id}.`));
+		console.warn(`[bot] Leaving disallowed guild ${guild.id}.`);
+		await guild.leave().catch(() => console.error(`[bot] Could not leave disallowed guild ${guild.id}.`));
 		return;
 	}
 
-	if (client === primary) {
-		await guild.commands.set(commandData).catch(() => {
-			console.error(`[commands:${guild.id}] Registration failed. Check the primary bot's server access and applications.commands authorization.`);
-		});
-	}
-}
-
-for (const [index, client] of clients.entries()) {
-	client.on(Events.GuildCreate, guild => {
-		void prepareGuild(client, guild);
-	});
-	client.on(Events.VoiceStateUpdate, (oldState, newState) => {
-		sessions?.onVoiceStateUpdate(client, oldState, newState);
-	});
-	client.on(Events.Error, () => {
-		console.error(`[bot:${index === 0 ? 'primary' : `worker-${index}`}] Discord client error. Check connectivity and the bot configuration.`);
+	await guild.commands.set(commandData).catch(() => {
+		console.error(`[commands:${guild.id}] Registration failed. Check the bot's server access and applications.commands authorization.`);
 	});
 }
 
-primary.on(Events.InteractionCreate, interaction => {
+client.on(Events.GuildCreate, guild => {
+	void prepareGuild(guild);
+});
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+	sessions?.onVoiceStateUpdate(oldState, newState);
+});
+client.on(Events.Error, () => {
+	console.error('[bot] Discord client error. Check connectivity and the bot configuration.');
+});
+client.on(Events.InteractionCreate, interaction => {
 	if (ready && sessions) {
 		void handleInteraction(interaction, sessions);
 	} else if (interaction.isChatInputCommand() && interaction.commandName === 'scribe') {
@@ -52,7 +45,7 @@ primary.on(Events.InteractionCreate, interaction => {
 });
 
 /** login() may resolve before ClientReady, so wait for both with a bounded deadline. */
-async function loginClient(client: Client, token: string): Promise<void> {
+async function loginClient(): Promise<void> {
 	let timer: NodeJS.Timeout | undefined;
 	let onReady: (() => void) | undefined;
 	const readyPromise = new Promise<void>((resolve, reject) => {
@@ -61,7 +54,9 @@ async function loginClient(client: Client, token: string): Promise<void> {
 		timer = setTimeout(() => reject(new Error('Discord login timed out.')), 45_000);
 	});
 	try {
-		await Promise.all([client.login(token), readyPromise]);
+		await Promise.all([client.login(config.token), readyPromise]);
+	} catch {
+		throw new Error('Bot login failed. Check DISCORD_TOKEN, network access, and enabled gateway intents.');
 	} finally {
 		clearTimeout(timer);
 		if (onReady) client.off(Events.ClientReady, onReady);
@@ -78,9 +73,9 @@ function shutdown(): Promise<void> {
 		try {
 			await sessions?.stop();
 		} catch {
-			console.error('[shutdown] Could not finish every session cleanly. Saved assignments remain available for restart.');
+			console.error('[shutdown] Could not finish every session cleanly. Saved mappings and follow settings remain available for restart.');
 		} finally {
-			await Promise.allSettled(clients.map(client => client.destroy()));
+			await Promise.allSettled([client.destroy()]);
 			clearTimeout(deadline);
 		}
 	})();
@@ -99,48 +94,25 @@ process.on('unhandledRejection', () => {
 });
 
 async function start(): Promise<void> {
-	const results = await Promise.allSettled(clients.map((client, index) => loginClient(client, tokens[index])));
+	await loginClient();
 	if (stopping) return;
-	if (results[0].status === 'rejected') {
-		throw new Error('Primary bot login failed. Check DISCORD_TOKEN, network access, and enabled gateway intents.');
-	}
-
-	const usable: Client[] = [];
-	const identities = new Set<string>();
-	for (const [index, result] of results.entries()) {
-		const client = clients[index];
-		if (result.status === 'rejected' || !client.user) {
-			console.error(`[worker-${index}] Login failed. Check entry ${index} in DISCORD_WORKER_TOKENS, network access, and gateway intents. Other bots will continue.`);
-			await client.destroy();
-			continue;
-		}
-
-		if (identities.has(client.user.id)) {
-			console.error(`[worker-${index}] Duplicate bot account ${client.user.id}. Each worker token must belong to a different bot. This duplicate worker is disabled.`);
-			await client.destroy();
-			continue;
-		}
-
-		identities.add(client.user.id);
-		usable.push(client);
-		console.log(`[bot:${index === 0 ? 'primary' : `worker-${index}`}] Logged in as ${client.user.tag}.`);
-		for (const guild of client.guilds.cache.values()) {
-			await prepareGuild(client, guild);
-		}
+	console.log(`[bot] Logged in as ${client.user!.tag}.`);
+	for (const guild of client.guilds.cache.values()) {
+		await prepareGuild(guild);
 	}
 
 	if (stopping) return;
-	sessions = new SessionManager(usable);
+	sessions = new SessionManager(client);
 	await sessions.restore();
 	if (stopping) return;
 	ready = true;
-	console.log(`Ready with ${usable.length}/${clients.length} configured bot accounts. Use /scribe status to see this server's capacity.`);
+	console.log('Ready. Watching saved voice-channel mappings; use /scribe status to see current calls and follow settings.');
 }
 
 await start().catch(async error => {
-	console.error('[startup]', error instanceof Error && error.message.startsWith('Primary bot login failed.')
+	console.error('[startup]', error instanceof Error && error.message.startsWith('Bot login failed.')
 		? error.message
-		: 'Startup failed. Check the saved assignment file and bot configuration.');
+		: 'Startup failed. Check the saved mapping files and bot configuration.');
 	await shutdown();
 	process.exitCode = 1;
 });
