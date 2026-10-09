@@ -327,6 +327,27 @@ test('stop during channel lookup cannot create a connection later', async () => 
 	assert.equal(joins, 0);
 });
 
+test('duplicate speaking events reserve one capture and stop cancels an in-flight user lookup', async () => {
+	const fake = fakeClient('bot-a');
+	fake.channels.get('guild-a:voice-a').members.set('human', {user: {bot: false}});
+	const connection = fakeConnection();
+	const lookup = deferred<any>();
+	let lookups = 0;
+	fake.client.users.fetch = (() => { lookups++; return lookup.promise; }) as any;
+	const session = new TranscriberSession(fake.client, route(), {
+		join: () => connection,
+		waitForReady: async () => { connection.state = {status: VoiceConnectionStatus.Ready} as any; },
+	});
+	await session.start(false);
+	const first = internals(session).captureUser('human', connection);
+	const second = internals(session).captureUser('human', connection);
+	assert.equal(lookups, 1);
+	await session.stop(false);
+	lookup.resolve({id: 'human', bot: false});
+	await Promise.all([first, second]);
+	assert.deepEqual(fake.sent, []);
+});
+
 for (const action of ['stop', 'deafen-undeafen', 'destination-change'] as const) {
 	test(`late transcription is discarded after ${action}`, async () => {
 		const fake = fakeClient('bot-a');
@@ -416,4 +437,32 @@ test('source labels cannot push long transcript messages beyond the Discord limi
 	assert.equal(fake.sent[0].content.length, 2000);
 	assert.ok(fake.sent[0].content.startsWith('<#12345678901234567890> <@human>'));
 	await session.stop(false);
+});
+
+test('a successful later send clears the destination error without hiding voice errors', async () => {
+	const fake = fakeClient('bot-a');
+	const destination = fake.channels.get('guild-a:text-a');
+	const send = destination.send;
+	destination.send = async () => { throw new Error('Missing Permissions'); };
+	const session = new TranscriberSession(fake.client, route());
+	await session.start(true);
+	assert.equal(session.state, 'error');
+	assert.match(session.error!, /Could not send/);
+	destination.send = send;
+	await session.announceAssignment();
+	assert.equal(session.state, 'parked');
+	assert.equal(session.error, undefined);
+	await session.stop(false);
+});
+
+test('a missing or unusable destination is visible as a session error', async () => {
+	for (const destination of [null, {isTextBased: () => false}]) {
+		const fake = fakeClient('bot-a');
+		fake.client.channels.fetch = (async () => destination) as any;
+		const session = new TranscriberSession(fake.client, route());
+		await session.start(true);
+		assert.equal(session.state, 'error');
+		assert.match(session.error!, /Could not send/);
+		await session.stop(false);
+	}
 });

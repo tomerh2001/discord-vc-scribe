@@ -56,6 +56,7 @@ export class TranscriberSession {
 	private parked = false;
 	private connecting = false;
 	private problem: string | undefined;
+	private logProblem: string | undefined;
 	private epoch = 0;
 	private sendQueue: Promise<void> = Promise.resolve();
 	private lifecycle: Promise<void> = Promise.resolve();
@@ -81,14 +82,14 @@ export class TranscriberSession {
 
 	get state(): string {
 		if (this.destroyed) return 'stopped';
-		if (this.problem) return 'error';
+		if (this.error) return 'error';
 		if (this.parked) return 'parked';
 		if (this.connecting || !this.connection || this.connection.state.status !== VoiceConnectionStatus.Ready) return 'connecting';
 		return this.deafened ? 'paused' : 'listening';
 	}
 
 	get error(): string | undefined {
-		return this.problem;
+		return this.problem ?? this.logProblem;
 	}
 
 	get isDeafened(): boolean {
@@ -440,11 +441,14 @@ export class TranscriberSession {
 		this.sendQueue = this.sendQueue.then(async () => {
 			if (!canSend()) return;
 			const channel = await this.client.channels.fetch(destination);
-			if (canSend() && channel?.isTextBased() && 'send' in channel) {
-				await channel.send({content, allowedMentions: {parse: []}});
+			if (!canSend()) return;
+			if (!channel?.isTextBased() || !('send' in channel)) {
+				throw new Error('The assigned destination no longer exists or cannot receive messages.');
 			}
+			await channel.send({content, allowedMentions: {parse: []}});
+			this.logProblem = undefined;
 		}).catch(error => {
-			this.problem = 'Could not send messages to the assigned destination. Check channel permissions.';
+			this.logProblem = 'Could not send messages to the assigned destination. Check channel permissions.';
 			console.error(`[log:${this.assignment.guildId}:${destination}]`, error);
 		});
 	}
