@@ -1,104 +1,129 @@
 # VC Scribe
 
-A **private, self-hosted Discord bot** that sits in a voice channel 24/7 and writes down everything that happens:
+A self-hosted Discord transcription bot that watches any number of voice-to-chat mappings. One bot joins one call at a time per server, writes to that room's destination, and picks another occupied mapped room when the current call ends. Optional person-following gives one person's mapped room priority.
 
-- 🎙️ **Speech → text** — every spoken sentence becomes a message: `@Speaker what they said`
-- ➡️ **Join / leave log** — `@User joined the call` / `@User left the call`
-- 🔇 **Deafen to pause** — server-deafen the bot and it stops transcribing; undeafen to resume
-- 📌 **Assigned, not invited** — `/scribe assign` parks it in a VC until you `/scribe unassign` (it survives restarts and reconnects on its own)
-- 💤 **Presence-aware** — leaves the voice channel when the last person leaves, hops back in the moment someone joins (while staying assigned)
-- 🏠 **Runs entirely on your hardware** — audio never leaves your server; STT is a local Whisper model
+- **Transcripts with speakers:** each received speech segment becomes a message attributed to its speaker.
+- **Flexible destinations:** map a voice or stage channel to text, announcement, thread, or voice-channel chat destinations.
+- **Automatic joining:** the bot joins occupied mapped rooms when idle and leaves empty rooms.
+- **Optional following:** follow one person between mapped rooms; following starts off.
+- **Persistent settings:** mappings and the follow target survive restarts. Server-deafen the bot to pause transcription.
 
-Transcript messages render mentions (`@name`) but never ping anyone.
+Transcript messages render mentions without pinging anyone. With a local speech-to-text server, received audio stays on your hardware after Discord delivers it to the bot.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    VC[Voice channel] -->|per-user Opus streams| BOT[VC Scribe<br/>discord.js]
-    BOT -->|16kHz WAV| STT[speaches<br/>faster-whisper]
-    STT -->|text| BOT
-    BOT -->|"@user said this"| LOG[#transcript channel]
+    MAP[Saved voice-to-chat mappings] --> PICK[Choose one occupied room]
+    FOLLOW[Optional followed person] --> PICK
+    PICK --> BOT[VC Scribe]
+    BOT -->|16kHz WAV per speaker| STT[Speech-to-text server]
+    STT -->|transcript| BOT
+    BOT --> LOG[Selected room's chat destination]
 ```
 
-Discord delivers **a separate audio stream per speaker**, so attribution is exact — no diarization guesswork. Each stream is decoded, chunked on silence, and sent to a local [speaches](https://github.com/speaches-ai/speaches) (faster-whisper) server.
+Discord delivers a separate audio stream per speaker. The bot decodes each stream, splits speech at pauses, and sends it to an OpenAI-compatible transcription server such as [speaches](https://github.com/speaches-ai/speaches).
+
+### Choosing a call
+
+The bot watches saved mappings even while disconnected from voice. When a mapped room becomes occupied and the bot is idle, it joins. If several rooms are occupied, the others wait. Only the room the bot has joined is transcribed; waiting rooms are not recorded or transcribed later.
+
+With following off, another occupied room does not interrupt the current call. When the current room has no people left, the bot joins an occupied waiting room. If all mapped rooms are empty, it disconnects and waits.
+
+With following on, the followed person's mapped voice channel takes priority. The bot can leave an ongoing call to join that person's mapped room. It never follows them into an unmapped room. If the person goes offline, leaves voice, or enters an unmapped room, the current call continues while other people remain. When that room becomes empty, the normal waiting-room selection resumes. Turning following off also leaves the current call running.
+
+Each voice channel has one destination. Running `/scribe assign` again updates that mapping. Multiple voice channels can share a destination; transcript lines identify the source voice channel when they do. Joining a call posts an assignment notice in that room's destination.
 
 ## Setup
 
-### 1. Create the Discord app (private!)
+### 1. Create the Discord app
 
-1. Go to the [Developer Portal](https://discord.com/developers/applications) → **New Application**
-2. **Bot** tab:
-   - **Uncheck "Public Bot"** ← this is what keeps it yours; only you can add it to servers
-   - **Reset Token** and copy it
-3. No privileged intents are needed.
-4. Invite it with (replace `YOUR_APP_ID`):
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application.
+2. In its **Bot** tab, disable **Public Bot** if only you should be able to invite it. Copy its bot token.
+3. Invite the bot with the `bot` and `applications.commands` scopes and **View Channels**, **Connect**, and **Send Messages** permissions. No privileged intents are needed.
+
+Replace `YOUR_APP_ID` in this invite URL:
 
 ```text
 https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot%20applications.commands&permissions=1051648
 ```
-
-`1051648` = View Channels + Connect + Send Messages.
 
 ### 2. Run it
 
 ```bash
 git clone https://github.com/tomerh2001/discord-vc-scribe.git
 cd discord-vc-scribe
-cp .env.example .env   # paste your DISCORD_TOKEN
+cp .env.example .env
+# Set DISCORD_TOKEN in .env.
 docker compose up -d --build
 ```
 
-First transcription downloads the Whisper model (~500 MB for `small`), so give it a minute.
+The speech-to-text server downloads its model on first use; startup time depends on the model and connection speed.
 
 <details>
-<summary>Bare-metal instead of Docker</summary>
+<summary>Run without Docker</summary>
+
+Install Node.js 24 or newer, then run:
 
 ```bash
-npm install
+npm ci
 npm run build
 STT_URL=http://your-stt-server:8000 node dist/index.js
 ```
 
-Point `STT_URL` at any OpenAI-compatible `/v1/audio/transcriptions` endpoint
-(speaches, faster-whisper-server, or even OpenAI itself).
+Set `DISCORD_TOKEN` in `.env`. Point `STT_URL` at an OpenAI-compatible `/v1/audio/transcriptions` endpoint.
 
 </details>
 
-### 3. Use it
+### 3. Map rooms and choose optional following
 
-| Action | How |
+| Action | Command |
 |---|---|
-| Start logging | `/scribe assign voice_channel:#General log_channel:#transcript` |
-| Stop | `/scribe unassign` |
-| Pause / resume transcription | Right-click the bot → **Server Deafen** / undeafen |
-| Move it | Drag it to another VC — it follows and keeps logging |
-| Check state | `/scribe status` |
+| Watch a room and choose its transcript destination | `/scribe assign voice_channel:#General log_channel:#transcript` |
+| Remove one mapping | `/scribe unassign voice_channel:#General` |
+| Follow a person between mapped rooms | `/scribe follow user:@person` |
+| Turn following off without interrupting the call | `/scribe unfollow` |
+| See mappings, current states, and follow target | `/scribe status` |
 
-Commands require **Manage Server** permission.
+Repeat `/scribe assign` for each voice-to-chat pair. A mapping can be saved while another mapped room is active. Server-deafen the bot to pause transcription; undeafen it to resume.
 
-> ⚠️ Kicking the bot from the VC does *not* remove it — it reconnects (that's the 24/7 part). Use `/scribe unassign`.
+Status distinguishes **active**, **waiting** (occupied while another room is active), and **idle** (empty) mappings. It also shows connecting, paused, or error states when applicable. Following is off until an administrator explicitly enables it, and its saved setting applies only to that server.
+
+All commands require **Manage Server**, checked when each command runs. The person selected for following must be a member of the server and cannot be a bot.
+
+The caller must be able to view both selected channels. The bot needs **View Channel** and **Connect** in each mapped voice channel, plus **View Channel** and **Send Messages** in its destination. Threads require **Send Messages in Threads** and must be open and unlocked. Private threads also require caller and bot membership, unless they have **Manage Threads**. Channel permission overrides apply to public and private rooms alike.
+
+Dragging the bot to another room does not create or change a mapping. Use the commands to change the rooms it watches. Disconnecting it manually does not remove a mapping; it can reconnect to an occupied mapped room.
 
 ## Configuration
 
-All via `.env` (see [.env.example](.env.example)):
+Set configuration in `.env`; see [.env.example](.env.example).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DISCORD_TOKEN` | — | Bot token (required) |
-| `STT_URL` | `http://localhost:8000` | OpenAI-compatible STT server |
-| `STT_MODEL` | `Systran/faster-whisper-small` | Whisper model (`medium`/`large-v3` w/ GPU) |
-| `STT_LANGUAGE` | auto-detect | Language hint, e.g. `en`, `he` |
-| `ALLOWED_GUILD_IDS` | allow all | Comma-separated server IDs; bot leaves any other server |
-| `SILENCE_MS` | `1200` | Pause that ends a sentence |
-| `MIN_SPEECH_MS` | `600` | Discard shorter blips |
-| `MAX_SEGMENT_MS` | `45000` | Flush long monologues in chunks |
+| `DISCORD_TOKEN` | required | The bot's token |
+| `STT_URL` | `http://localhost:8000` | OpenAI-compatible transcription server |
+| `STT_MODEL` | `Systran/faster-whisper-small` | Transcription model |
+| `STT_LANGUAGE` | auto-detect | Optional language hint, such as `en` or `he` |
+| `STT_LANGUAGES` | all | Comma-separated language codes to retain |
+| `STT_VAD` | off | Enable server voice-activity detection with `true`, `yes`, or `1` |
+| `ALLOWED_GUILD_IDS` | allow all | Comma-separated server IDs; the bot leaves other servers |
+| `SILENCE_MS` | `1200` | Pause length that ends a speech segment |
+| `MIN_SPEECH_MS` | `600` | Discard shorter audio segments |
+| `MAX_SEGMENT_MS` | `45000` | Split continuous speech into bounded segments |
+| `DATA_DIR` | `./data` | Directory containing saved mappings and follow settings |
 
-## Good to know
+## Development
 
-- **Consent**: this bot records and transcribes voice. Discord's ToS expects everyone in the call to know — put it in the channel name/topic and tell your friends.
-- **Voice receive** isn't officially documented by Discord, but has been stable in discord.js for years (Craig, Scripty, and friends all rely on it).
-- **Hardware**: `small` on CPU keeps up with normal conversation. A GPU makes `large-v3` effortless (`:latest-cuda` image tag).
+Node.js 24 or newer is required. Run `npm ci`, `npm run build`, and `npm test`. Tests use fake Discord clients to cover persistence, room selection, following, command permissions, and session lifecycle. CI runs these checks before publishing `ghcr.io/tomerh2001/discord-vc-scribe:latest` from `main`.
+
+Mappings are saved in `assignments.json` and follow settings in `settings.json`, both under `DATA_DIR`. Saved state is validated on load and written by atomic replacement. A corrupt file fails startup without erasing saved settings. Do not run multiple service processes with the same token or data directory. Failed mappings remain visible in status; repair permissions and reassign the room or restart to retry.
+
+When a room empties, the bot waits up to three seconds for its final speech to finish transcribing before moving on. Unfinished transcription work is then discarded. A message already submitted to Discord must finish sending before the move, so a slow Discord response can delay the handoff further. Deafening, destination changes, removal, and a follow-priority move discard pending audio and queued transcripts. Audio from the previous room cannot be sent to the next room's destination.
+
+## Recording
+
+Tell participants that the bot transcribes the call. Voice reception depends on Discord and the receiving library; only audio received while the bot is connected can be transcribed.
 
 ## License
 
