@@ -9,8 +9,33 @@ function required(name: string): string {
 	return value;
 }
 
+const token = required('DISCORD_TOKEN');
+
+function workerTokens(): string[] {
+	let value: unknown;
+	try {
+		value = JSON.parse(process.env.DISCORD_WORKER_TOKENS ?? '[]');
+	} catch {
+		throw new Error('DISCORD_WORKER_TOKENS must be a JSON array of bot tokens.');
+	}
+
+	if (!Array.isArray(value)
+		|| value.some(item => typeof item !== 'string' || !item.trim() || item !== item.trim())) {
+		throw new Error('DISCORD_WORKER_TOKENS must be a JSON array of non-empty bot tokens without surrounding whitespace.');
+	}
+
+	const tokens = value as string[];
+	if (new Set([token, ...tokens]).size !== tokens.length + 1) {
+		throw new Error('DISCORD_WORKER_TOKENS must contain distinct bot tokens and must not include DISCORD_TOKEN.');
+	}
+
+	return tokens;
+}
+
 export const config = {
-	token: required('DISCORD_TOKEN'),
+	token,
+	/** Additional bot identities, each providing one more concurrent voice channel per guild. */
+	workerTokens: workerTokens(),
 	/** Base URL of an OpenAI-compatible transcription server (speaches, faster-whisper-server, etc.). */
 	sttUrl: process.env.STT_URL ?? 'http://localhost:8000',
 	sttModel: process.env.STT_MODEL ?? 'Systran/faster-whisper-small',

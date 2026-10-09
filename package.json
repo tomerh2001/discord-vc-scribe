@@ -1,16 +1,17 @@
 {
   "name": "discord-vc-scribe",
   "version": "0.1.0",
-  "description": "Private 24/7 Discord voice-channel scribe — sits in a VC, logs joins/leaves, and transcribes who said what into a text channel.",
+  "description": "Discord voice transcription with independent channel assignments and concurrent bot workers.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "test": "DISCORD_TOKEN=test-token node --import tsx --test tests/*.test.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "license": "MIT",
   "repository": {
