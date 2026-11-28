@@ -255,7 +255,7 @@ export class TranscriberSession {
 		this.invalidateAudio();
 		this.destroyConnection();
 		this.problem = 'Voice connection lost. Waiting to reconnect.';
-		if (this.started) this.log(`⚠️ Lost connection to <#${this.assignment.voiceChannelId}>. Transcription is paused while reconnecting.`);
+		if (this.started) this.log(`⚠️ Lost connection to <#${this.assignment.voiceChannelId}>. Transcription is paused while reconnecting.`, undefined, true);
 		this.started = false;
 		this.dependencies.onConnectionLost();
 	}

@@ -392,7 +392,6 @@ test('connection loss is announced once and does not produce a second stop notic
 	await f.session.start(true);
 	f.connection.emit(VoiceConnectionStatus.Disconnected);
 	f.connection.emit(VoiceConnectionStatus.Disconnected);
-	await internals(f.session).sendQueue;
 	await f.session.stop(true);
 	assert.equal(f.sent.length, 2);
 	assert.match(f.sent[1].content, /Lost connection to <#voice-a>.*paused/);
