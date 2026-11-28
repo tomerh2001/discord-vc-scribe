@@ -103,7 +103,7 @@ export class SessionManager {
 							console.error(`[restore:${guildId}:${entry.assignment.voiceChannelId}]`, error);
 						}
 					}
-					await this.reconcileGuild(guildId, false);
+					await this.reconcileGuild(guildId);
 				});
 			}
 		} finally {
@@ -181,7 +181,7 @@ export class SessionManager {
 		this.stopping = true;
 		for (const guildId of this.retryTimers.keys()) this.clearRetry(guildId);
 		// Interrupt pending joins/drains before waiting for serialized mutations.
-		await Promise.allSettled([...this.active.values(), ...this.draining.values()].map(current => current.session.stop(false)));
+		await Promise.allSettled([...this.active.values(), ...this.draining.values()].map(current => current.session.stop(true)));
 		await Promise.allSettled(this.mutations.values());
 		await Promise.allSettled([...this.active.values()].map(current => current.session.stop(false)));
 		this.active.clear();
@@ -245,7 +245,7 @@ export class SessionManager {
 				const empty = !this.humanChannels(guildId).has(current.session.assignment.voiceChannelId);
 				if (target) this.pendingMoves.add(guildId);
 				this.draining.set(guildId, current);
-				try { await current.session.stop(false, {flushFinalAudio: empty && !current.lost, disconnect: !target}); }
+				try { await current.session.stop(true, {flushFinalAudio: empty && !current.lost, disconnect: !target}); }
 				finally { if (this.draining.get(guildId) === current) this.draining.delete(guildId); }
 				continue; // Re-read occupancy after the bounded final-audio drain.
 			}

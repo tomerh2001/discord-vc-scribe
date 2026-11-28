@@ -8,6 +8,8 @@ A self-hosted Discord transcription bot that watches any number of voice-to-chat
 - **Optional following:** follow one person between mapped rooms; following starts off.
 - **Persistent settings:** mappings and the follow target survive restarts. Server-deafen the bot to pause transcription.
 
+Speech is translated into English by default, with automatic source-language detection. English speech stays in English. Set `STT_TASK=transcribe` to retain the original spoken language instead. Use a multilingual model that supports translation, such as Whisper small, medium, or large-v3.
+
 Transcript messages render mentions without pinging anyone. With a local speech-to-text server, received audio stays on your hardware after Discord delivers it to the bot.
 
 ## How it works
@@ -32,7 +34,9 @@ With following off, another occupied room does not interrupt the current call. W
 
 With following on, the followed person's mapped voice channel takes priority. The bot can leave an ongoing call to join that person's mapped room. It never follows them into an unmapped room. If the person goes offline, leaves voice, or enters an unmapped room, the current call continues while other people remain. When that room becomes empty, the normal waiting-room selection resumes. Turning following off also leaves the current call running.
 
-Each voice channel has one destination. Running `/scribe assign` again updates that mapping. Multiple voice channels can share a destination; transcript lines identify the source voice channel when they do. Joining a call posts an assignment notice in that room's destination.
+Each voice channel has one destination. Running `/scribe assign` again updates that mapping. To keep every transcript in one log, assign each watched voice channel to the same destination. Transcript lines identify the source voice channel when destinations are shared.
+
+Successful joins, including after restart, post a notice naming the room being heard. Leaving a room posts a stopped-listening notice after its final transcript messages. Connection losses post a paused notice, and a successful reconnect posts a fresh listening notice. A failed or cancelled join never claims the bot is listening.
 
 ## Setup
 
@@ -71,7 +75,7 @@ npm run build
 STT_URL=http://your-stt-server:8000 node dist/index.js
 ```
 
-Set `DISCORD_TOKEN` in `.env`. Point `STT_URL` at an OpenAI-compatible `/v1/audio/transcriptions` endpoint.
+Set `DISCORD_TOKEN` in `.env`. Point `STT_URL` at a server supporting the OpenAI-compatible `/v1/audio/translations` endpoint, or `/v1/audio/transcriptions` for `STT_TASK=transcribe`.
 
 </details>
 
@@ -104,8 +108,9 @@ Set configuration in `.env`; see [.env.example](.env.example).
 | `DISCORD_TOKEN` | required | The bot's token |
 | `STT_URL` | `http://localhost:8000` | OpenAI-compatible transcription server |
 | `STT_MODEL` | `Systran/faster-whisper-small` | Transcription model |
-| `STT_LANGUAGE` | auto-detect | Optional language hint, such as `en` or `he` |
-| `STT_LANGUAGES` | all | Comma-separated language codes to retain |
+| `STT_TASK` | `translate` | `translate` produces English; `transcribe` retains the source language |
+| `STT_LANGUAGE` | auto-detect | Optional source-language hint for transcription only |
+| `STT_LANGUAGES` | all | Source-language filter for transcription only; translation accepts every detected language |
 | `STT_VAD` | off | Enable server voice-activity detection with `true`, `yes`, or `1` |
 | `ALLOWED_GUILD_IDS` | allow all | Comma-separated server IDs; the bot leaves other servers |
 | `SILENCE_MS` | `1200` | Pause length that ends a speech segment |

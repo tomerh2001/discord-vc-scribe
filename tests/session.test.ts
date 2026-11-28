@@ -7,6 +7,7 @@ import {VoiceConnectionStatus, type VoiceConnection} from '@discordjs/voice';
 import type {Client, VoiceState} from 'discord.js';
 import {SessionSelectionChangedError, TranscriberSession} from '../src/session.js';
 import type {Transcription} from '../src/stt.js';
+import {config} from '../src/config.js';
 
 const route = {guildId: 'guild', voiceChannelId: 'voice-a', logChannelId: 'text-a'};
 const spoken: Transcription = {text: 'A useful sentence with enough words.', language: 'en', noSpeechProb: 0, avgLogprob: 0};
@@ -365,4 +366,62 @@ test('successful sends clear destination errors and missing destinations remain 
 	await f.session.announceAssignment();
 	assert.match(f.session.error!, /Could not send/);
 	await f.session.stop(false);
+});
+
+test('successful listening and stopping notices identify the voice channel in the saved destination', async () => {
+	const f = fixture();
+	await f.session.start(true);
+	await f.session.stop(true);
+	await f.session.stop(true);
+	assert.deepEqual(f.sent, [
+		{channelId: 'text-a', content: '🎙️ Now listening to <#voice-a>. Transcripts are posted here.'},
+		{channelId: 'text-a', content: '⏹️ Stopped listening to <#voice-a>.'},
+	]);
+});
+
+test('a deafened startup reports the room without claiming active transcription', async () => {
+	const f = fixture();
+	f.guild.members.fetchMe = async () => ({voice: {channelId: 'voice-a', deaf: true}});
+	await f.session.start(true);
+	assert.match(f.sent[0].content, /Connected to <#voice-a>.*paused/);
+	await f.session.stop(false);
+});
+
+test('connection loss is announced once and does not produce a second stop notice', async () => {
+	const f = fixture();
+	await f.session.start(true);
+	f.connection.emit(VoiceConnectionStatus.Disconnected);
+	f.connection.emit(VoiceConnectionStatus.Disconnected);
+	await internals(f.session).sendQueue;
+	await f.session.stop(true);
+	assert.equal(f.sent.length, 2);
+	assert.match(f.sent[1].content, /Lost connection to <#voice-a>.*paused/);
+});
+
+test('final speech finishes before the channel stop notice', async () => {
+	const result = deferred<Transcription>();
+	const f = fixture({transcribe: () => result.promise});
+	await beginCapture(f);
+	const stop = f.session.stop(true, {flushFinalAudio: true});
+	result.resolve(spoken);
+	await stop;
+	assert.deepEqual(f.sent, [
+		{channelId: 'text-a', content: `<@human> ${spoken.text}`},
+		{channelId: 'text-a', content: '⏹️ Stopped listening to <#voice-a>.'},
+	]);
+});
+
+test('English translations survive source-language filters while transcription still respects them', async t => {
+	const previous = {sttTask: config.sttTask, sttLanguages: config.sttLanguages};
+	t.after(() => Object.assign(config, previous));
+	config.sttLanguages = ['en', 'he'];
+	for (const task of ['translate', 'transcribe'] as const) {
+		config.sttTask = task;
+		const f = fixture({transcribe: async () => ({...spoken, language: 'ru'})});
+		await f.session.start(false);
+		await internals(f.session).finishSegment('human', pcm, 0);
+		await internals(f.session).sendQueue;
+		assert.equal(f.sent.length, task === 'translate' ? 1 : 0);
+		await f.session.stop(false);
+	}
 });
