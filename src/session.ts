@@ -15,6 +15,18 @@ import {transcribe} from './stt.js';
 
 const TYPING_REFRESH_MS = 8000;
 
+const LANGUAGE_LABELS: Record<string, string> = {
+	he: 'HEB', ru: 'RUS', es: 'SPA', ar: 'ARA', uk: 'UKR',
+	fr: 'FRA', de: 'DEU', it: 'ITA', pt: 'POR', ja: 'JPN', ko: 'KOR', zh: 'ZHO',
+};
+
+function translationPrefix(language: string): string {
+	if (config.sttTask !== 'translate' || language === 'en') return '';
+	const label = LANGUAGE_LABELS[language]
+		?? (/^[a-z]{2,3}$/.test(language) ? language.toUpperCase() : 'AUTO');
+	return `\`${label} → ENG\` `;
+}
+
 /** Selection changed during an asynchronous lookup or connection handshake. */
 export class SessionSelectionChangedError extends Error {
 	constructor() {
@@ -498,7 +510,7 @@ export class TranscriberSession {
 			if (config.sttTask === 'transcribe' && config.sttLanguages.length > 0 && !config.sttLanguages.includes(language)) return;
 			if (noSpeechProb > 0.6 && avgLogprob < -0.7) return;
 			if (isLikelyHallucination(text, durationMs)) return;
-			this.log(`<@${userId}> ${text}`.slice(0, 1990), epoch);
+			this.log(`<@${userId}> ${text}`, epoch, false, translationPrefix(language));
 		} catch (error) {
 			console.error(`[stt:${this.assignment.guildId}:${this.assignment.voiceChannelId}]`, error);
 		} finally {
@@ -506,10 +518,10 @@ export class TranscriberSession {
 		}
 	}
 
-	private log(content: string, audioEpoch?: number, allowStopped = false): void {
+	private log(content: string, audioEpoch?: number, allowStopped = false, prefix = ''): void {
 		const destination = this.assignment.logChannelId;
 		if (this.dependencies.labelSource(destination)) content = `<#${this.assignment.voiceChannelId}> ${content}`;
-		content = content.slice(0, 2000);
+		content = `${prefix}${content}`.slice(0, 2000);
 		const canSend = () => (allowStopped || !this.destroyed)
 			&& (audioEpoch === undefined || this.audioIsCurrent(audioEpoch));
 		this.sendQueue = this.sendQueue.then(async () => {
