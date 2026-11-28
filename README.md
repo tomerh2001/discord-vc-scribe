@@ -10,6 +10,8 @@ A self-hosted Discord transcription bot that watches any number of voice-to-chat
 
 Speech is translated into English by default, with automatic source-language detection. English speech stays in English. Set `STT_TASK=transcribe` to retain the original spoken language instead. Use a multilingual model that supports translation, such as Whisper small, medium, or large-v3.
 
+Translated messages start with a compact code-style language label, such as `HEB → ENG`, before the voice-channel and speaker labels. English speech has no translation label. If the speech server omits the source language, `AUTO → ENG` identifies automatic translation without guessing the language.
+
 Transcript messages render mentions without pinging anyone. With a local speech-to-text server, received audio stays on your hardware after Discord delivers it to the bot.
 
 ## How it works
