@@ -12,13 +12,14 @@ const deferred = () => { let resolve!: () => void; const promise = new Promise<v
 type StopOptions = {flushFinalAudio?: boolean; disconnect?: boolean};
 class FakeSession {
 	state = 'connecting'; error: string | undefined; isDeafened = false;
+	starts: boolean[] = [];
 	stops: Array<{announce: boolean; options: StopOptions}> = [];
 	events: Array<[VoiceState, VoiceState]> = [];
 	destinationChanges = 0;
 	private cancelled = false;
 	constructor(readonly assignment: Assignment, readonly onLost: () => void, readonly labelSource: (destination: string) => boolean, readonly isSelected: () => boolean,
 		private readonly startHook: (session: FakeSession) => Promise<void>, private readonly stopHook: (session: FakeSession) => Promise<void>) {}
-	async start() { await this.startHook(this); if (this.cancelled || !this.isSelected()) throw new SessionSelectionChangedError(); this.state = 'listening'; }
+	async start(announce: boolean) { this.starts.push(announce); await this.startHook(this); if (this.cancelled || !this.isSelected()) throw new SessionSelectionChangedError(); this.state = 'listening'; }
 	async stop(announce: boolean, options: StopOptions = {}) { this.stops.push({announce, options}); this.cancelled = true; this.state = 'stopped'; await this.stopHook(this); }
 	async announceAssignment() {}
 	updateDestination(logChannelId: string) { this.assignment.logChannelId = logChannelId; this.destinationChanges++; }
@@ -80,12 +81,13 @@ test('automatic routing stays in a busy room, then moves directly to a waiting o
 	f.move('alice', 'a'); await f.settle(); f.move('bob', 'b'); await f.settle();
 	assert.equal(f.active(), 'a'); assert.equal(f.manager.list('guild')[1].state, 'waiting');
 	f.move('alice', null); await f.settle(); assert.equal(f.active(), 'b');
-	assert.deepEqual(f.created[0].stops[0].options, {flushFinalAudio: true, disconnect: false}); assert.deepEqual(f.leaves, []);
+	assert.deepEqual(f.created[0].stops[0], {announce: true, options: {flushFinalAudio: true, disconnect: false}}); assert.deepEqual(f.leaves, []);
+	assert.deepEqual(f.created[1].starts, [true]);
 	f.move('alice', 'a'); await f.settle(); assert.equal(f.active(), 'b'); await f.manager.stop();
 });
 test('the bot disconnects only when all mapped rooms are empty and wakes for the next call', async () => {
 	const f = fixture(); await f.assign('a'); f.move('alice', 'a'); await f.settle(); f.move('alice', null); await f.settle();
-	assert.equal(f.active(), undefined); assert.deepEqual(f.created[0].stops[0].options, {flushFinalAudio: true, disconnect: true});
+	assert.equal(f.active(), undefined); assert.deepEqual(f.created[0].stops[0], {announce: true, options: {flushFinalAudio: true, disconnect: true}});
 	assert.equal(f.manager.list('guild')[0].state, 'idle'); f.move('alice', 'a'); await f.settle(); assert.equal(f.created.length, 2); await f.manager.stop();
 });
 test('one remaining human keeps the current call active', async () => {
@@ -95,9 +97,10 @@ test('one remaining human keeps the current call active', async () => {
 test('follow overrides a busy call and forced handoff cancels old audio', async () => {
 	const f = fixture(); await f.assign('a', 'b'); f.move('alice', 'a'); f.move('target', 'b'); await f.settle();
 	await f.manager.setFollow('guild', 'target'); assert.equal(f.active(), 'b');
-	assert.deepEqual(f.created[0].stops[0].options, {flushFinalAudio: false, disconnect: false});
+	assert.deepEqual(f.created[0].stops[0], {announce: true, options: {flushFinalAudio: false, disconnect: false}});
+	assert.deepEqual(f.created[1].starts, [true]);
 	assert.deepEqual(f.settings(), [{guildId: 'guild', followUserId: 'target'}]);
-	f.move('target', 'a'); await f.settle(); assert.equal(f.active(), 'a'); await f.manager.stop();
+	f.move('target', 'a'); await f.settle(); assert.equal(f.active(), 'a'); assert.deepEqual(f.created[2].starts, [true]); await f.manager.stop();
 });
 test('follow never joins unmapped rooms; other speakers retain the call after the target leaves', async () => {
 	const f = fixture(); await f.assign('a', 'b'); f.move('alice', 'a'); f.move('target', 'b'); f.move('bob', 'b'); await f.settle();
@@ -116,7 +119,7 @@ test('an absent or unmapped follow target does not disable auto-join', async () 
 test('restore loads all mappings and settings before choosing the saved follow target', async () => {
 	const initial = [route(), route('b'), route('c')]; const f = fixture({initial, settings: [{guildId: 'guild', followUserId: 'target'}]});
 	f.move('alice', 'a', {notify: false}); f.move('target', 'b', {notify: false}); await f.manager.restore();
-	assert.equal(f.created.length, 1); assert.equal(f.active(), 'b'); assert.deepEqual(f.stored(), initial); await f.manager.stop();
+	assert.equal(f.created.length, 1); assert.equal(f.active(), 'b'); assert.deepEqual(f.created[0].starts, [true]); assert.deepEqual(f.stored(), initial); await f.manager.stop();
 });
 test('repeated assignments and destination updates preserve the active voice session', async () => {
 	const f = fixture(); f.move('alice', 'a', {notify: false}); await f.assign('a', 'a'); await f.manager.assign(route('a', 'text-b'));

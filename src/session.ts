@@ -67,6 +67,7 @@ export class TranscriberSession {
 	private destroyed = false;
 	private stopping = false;
 	private connecting = false;
+	private started = false;
 	private problem: string | undefined;
 	private logProblem: string | undefined;
 	private epoch = 0;
@@ -129,12 +130,16 @@ export class TranscriberSession {
 			this.invalidateAudio();
 			throw new SessionSelectionChangedError();
 		}
+		this.started = true;
 		if (announce) await this.announceAssignment();
 	}
 
 	async announceAssignment(): Promise<void> {
-		const suffix = this.deafened ? ' I am currently deafened, so transcription is paused.' : '';
-		this.log(`📌 Assigned to <#${this.assignment.voiceChannelId}>. Logging this call here.${suffix}`);
+		this.log(!this.started || this.connection?.state.status !== VoiceConnectionStatus.Ready
+			? `⚠️ Waiting to connect to <#${this.assignment.voiceChannelId}>. Transcription is paused.`
+			: this.deafened
+			? `🔇 Connected to <#${this.assignment.voiceChannelId}>. Transcription is paused while deafened.`
+			: `🎙️ Now listening to <#${this.assignment.voiceChannelId}>. Transcripts are posted here.`);
 		await this.sendQueue;
 	}
 
@@ -188,7 +193,8 @@ export class TranscriberSession {
 			if (this.pendingSegments.size === 0 && !this.destroyed) await this.sendQueue;
 			this.destroyed = true;
 			this.invalidateAudio();
-			if (announce) this.log('👋 Unassigned. Leaving the call.', undefined, true);
+			if (announce && this.started) this.log(`⏹️ Stopped listening to <#${this.assignment.voiceChannelId}>.`, undefined, true);
+			this.started = false;
 			// A send already handed to Discord finishes before this worker is reused.
 			await this.sendQueue;
 		})();
@@ -251,6 +257,8 @@ export class TranscriberSession {
 		this.invalidateAudio();
 		this.destroyConnection();
 		this.problem = 'Voice connection lost. Waiting to reconnect.';
+		if (this.started) this.log(`⚠️ Lost connection to <#${this.assignment.voiceChannelId}>. Transcription is paused while reconnecting.`, undefined, true);
+		this.started = false;
 		this.dependencies.onConnectionLost();
 	}
 
@@ -487,7 +495,7 @@ export class TranscriberSession {
 			const {text, language, noSpeechProb, avgLogprob} = await this.dependencies.transcribe(pcmToWavMono(pcm));
 			if (!this.audioIsCurrent(epoch)) return;
 			if (!text || /^[\s.,!?\-–—'"«»()[\]]*$/.test(text)) return;
-			if (config.sttLanguages.length > 0 && !config.sttLanguages.includes(language)) return;
+			if (config.sttTask === 'transcribe' && config.sttLanguages.length > 0 && !config.sttLanguages.includes(language)) return;
 			if (noSpeechProb > 0.6 && avgLogprob < -0.7) return;
 			if (isLikelyHallucination(text, durationMs)) return;
 			this.log(`<@${userId}> ${text}`.slice(0, 1990), epoch);

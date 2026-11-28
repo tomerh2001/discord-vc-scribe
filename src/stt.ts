@@ -2,7 +2,7 @@ import {config} from './config.js';
 
 export type Transcription = {
 	text: string;
-	/** ISO 639-1 code as reported by the model, normalized (e.g. "english" -> "en"). */
+	/** Source language reported by the model, normalized (e.g. "english" -> "en"), or "unknown". */
 	language: string;
 	/** Lowest per-segment no-speech probability — high values mean the clip is likely noise. */
 	noSpeechProb: number;
@@ -16,15 +16,15 @@ type VerboseResponse = {text?: string; language?: string; segments?: VerboseSegm
 const LANGUAGE_ALIASES: Record<string, string> = {english: 'en', hebrew: 'he', iw: 'he'};
 
 /**
- * Send a WAV buffer to an OpenAI-compatible `/v1/audio/transcriptions`
- * endpoint (speaches, faster-whisper-server, or the real OpenAI API).
+ * Send a WAV buffer to an OpenAI-compatible audio endpoint. Translation
+ * produces English text while preserving source-language and confidence metadata.
  */
 export async function transcribe(wav: Buffer): Promise<Transcription> {
 	const form = new FormData();
 	form.append('file', new Blob([new Uint8Array(wav)], {type: 'audio/wav'}), 'audio.wav');
 	form.append('model', config.sttModel);
 	form.append('response_format', 'verbose_json');
-	if (config.sttLanguage) {
+	if (config.sttTask === 'transcribe' && config.sttLanguage) {
 		form.append('language', config.sttLanguage);
 	}
 
@@ -32,7 +32,8 @@ export async function transcribe(wav: Buffer): Promise<Transcription> {
 		form.append('vad_filter', 'true');
 	}
 
-	const response = await fetch(new URL('/v1/audio/transcriptions', config.sttUrl), {
+	const endpoint = config.sttTask === 'translate' ? '/v1/audio/translations' : '/v1/audio/transcriptions';
+	const response = await fetch(new URL(endpoint, config.sttUrl), {
 		method: 'POST',
 		body: form,
 		// A wedged STT server must fail fast — otherwise requests pile up and

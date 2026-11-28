@@ -9,14 +9,25 @@ function required(name: string): string {
 	return value;
 }
 
+function sttTask(): 'translate' | 'transcribe' {
+	const value = process.env.STT_TASK ?? 'translate';
+	if (value !== 'translate' && value !== 'transcribe') {
+		throw new Error('STT_TASK must be "translate" or "transcribe"');
+	}
+
+	return value;
+}
+
 export const config = {
 	token: required('DISCORD_TOKEN'),
 	/** Base URL of an OpenAI-compatible transcription server (speaches, faster-whisper-server, etc.). */
 	sttUrl: process.env.STT_URL ?? 'http://localhost:8000',
 	sttModel: process.env.STT_MODEL ?? 'Systran/faster-whisper-small',
-	/** Optional ISO 639-1 language hint (e.g. "en", "he"). Leave unset for auto-detect. */
+	/** Translate all detected speech to English, or transcribe in the source language. */
+	sttTask: sttTask(),
+	/** Transcription-only ISO 639-1 language hint (e.g. "en", "he"). Translation always auto-detects. */
 	sttLanguage: process.env.STT_LANGUAGE || undefined,
-	/** Comma-separated ISO 639-1 codes; segments detected as any other language are dropped. Empty = keep all. */
+	/** Transcription-only language allowlist. Translation accepts every detected language. Empty = keep all. */
 	sttLanguages: (process.env.STT_LANGUAGES ?? '')
 		.split(',')
 		.map(code => code.trim().toLowerCase())
