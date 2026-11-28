@@ -135,7 +135,9 @@ export class TranscriberSession {
 	}
 
 	async announceAssignment(): Promise<void> {
-		this.log(this.deafened
+		this.log(!this.started || this.connection?.state.status !== VoiceConnectionStatus.Ready
+			? `⚠️ Waiting to connect to <#${this.assignment.voiceChannelId}>. Transcription is paused.`
+			: this.deafened
 			? `🔇 Connected to <#${this.assignment.voiceChannelId}>. Transcription is paused while deafened.`
 			: `🎙️ Now listening to <#${this.assignment.voiceChannelId}>. Transcripts are posted here.`);
 		await this.sendQueue;

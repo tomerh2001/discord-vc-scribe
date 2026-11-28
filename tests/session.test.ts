@@ -397,6 +397,18 @@ test('connection loss is announced once and does not produce a second stop notic
 	assert.match(f.sent[1].content, /Lost connection to <#voice-a>.*paused/);
 });
 
+test('changing destination during reconnect reports paused instead of claiming to listen', async () => {
+	const f = fixture();
+	await f.session.start(true);
+	f.connection.emit(VoiceConnectionStatus.Disconnected);
+	f.session.updateDestination('text-b');
+	await f.session.announceAssignment();
+	assert.deepEqual(f.sent.at(-1), {
+		channelId: 'text-b', content: '⚠️ Waiting to connect to <#voice-a>. Transcription is paused.',
+	});
+	await f.session.stop(true);
+});
+
 test('final speech finishes before the channel stop notice', async () => {
 	const result = deferred<Transcription>();
 	const f = fixture({transcribe: () => result.promise});
